@@ -8,6 +8,9 @@ public class Prescription {
     private String drugName;          // 处方开具的药品名称
     private String status;            // 处方状态：待发药 / 已发药 / 已退药
     private String traceCodeDispensed;// 实际扫码发出的追溯码 (发药时回写)
+    private Integer prescribedUnits;
+    private Integer dispensedUnits;
+    private String dispenseUnit;
     private String createTime;        // 处方开立时间
 
     // --- 下面是 Getter 和 Setter 方法 ---
@@ -58,6 +61,30 @@ public class Prescription {
 
     public void setTraceCodeDispensed(String traceCodeDispensed) {
         this.traceCodeDispensed = traceCodeDispensed;
+    }
+
+    public Integer getPrescribedUnits() {
+        return prescribedUnits;
+    }
+
+    public void setPrescribedUnits(Integer prescribedUnits) {
+        this.prescribedUnits = prescribedUnits;
+    }
+
+    public Integer getDispensedUnits() {
+        return dispensedUnits;
+    }
+
+    public void setDispensedUnits(Integer dispensedUnits) {
+        this.dispensedUnits = dispensedUnits;
+    }
+
+    public String getDispenseUnit() {
+        return dispenseUnit;
+    }
+
+    public void setDispenseUnit(String dispenseUnit) {
+        this.dispenseUnit = dispenseUnit;
     }
 
     public String getCreateTime() {

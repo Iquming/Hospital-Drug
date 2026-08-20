@@ -12,6 +12,13 @@ public class DrugStock {
     private Integer quantity;
     private String locationCode;
     private String unit;
+    private Boolean isSplitAllowed;
+    private String packageUnit;
+    private String minUnit;
+    private Integer minUnitsPerPackage;
+    private Integer remainingMinUnits;
+    private String parentTraceCode;
+    private String stockType;
 
     // ✅ 改动：将类型从 Date 改为 String，方便前端直接传 "2028-01-01" 格式
     // 原来如果是 Date 类型，前端传来的字符串需要额外转换，改为 String 更简单
@@ -47,6 +54,27 @@ public class DrugStock {
 
     public String getUnit() { return unit; }
     public void setUnit(String unit) { this.unit = unit; }
+
+    public Boolean getIsSplitAllowed() { return isSplitAllowed; }
+    public void setIsSplitAllowed(Boolean isSplitAllowed) { this.isSplitAllowed = isSplitAllowed; }
+
+    public String getPackageUnit() { return packageUnit; }
+    public void setPackageUnit(String packageUnit) { this.packageUnit = packageUnit; }
+
+    public String getMinUnit() { return minUnit; }
+    public void setMinUnit(String minUnit) { this.minUnit = minUnit; }
+
+    public Integer getMinUnitsPerPackage() { return minUnitsPerPackage; }
+    public void setMinUnitsPerPackage(Integer minUnitsPerPackage) { this.minUnitsPerPackage = minUnitsPerPackage; }
+
+    public Integer getRemainingMinUnits() { return remainingMinUnits; }
+    public void setRemainingMinUnits(Integer remainingMinUnits) { this.remainingMinUnits = remainingMinUnits; }
+
+    public String getParentTraceCode() { return parentTraceCode; }
+    public void setParentTraceCode(String parentTraceCode) { this.parentTraceCode = parentTraceCode; }
+
+    public String getStockType() { return stockType; }
+    public void setStockType(String stockType) { this.stockType = stockType; }
 
     // ✅ expireDate 使用 String 类型，直接与数据库 DATETIME 字段映射
     public String getExpireDate() { return expireDate; }

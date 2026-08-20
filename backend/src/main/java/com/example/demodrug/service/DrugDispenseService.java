@@ -1,6 +1,7 @@
 package com.example.demodrug.service;
 
 import com.example.demodrug.dao.DrugDao;
+import com.example.demodrug.entity.DrugSplitCode;
 import com.example.demodrug.entity.DrugStock;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -17,10 +18,17 @@ public class DrugDispenseService {
     private DrugDao drugDao;
 
     @Transactional(rollbackFor = Exception.class)
-    public void executeDispense(String traceCode, String patientId, String prescriptionIdStr) {
+    public void executeDispense(String traceCode, String patientId, String prescriptionIdStr, String operatorLabel) {
         String normalizedTraceCode = requireText(traceCode, "追溯码不能为空");
         String normalizedPatientId = StringUtils.hasText(patientId) ? patientId.trim() : "";
+        String operator = StringUtils.hasText(operatorLabel) ? operatorLabel.trim() : "未知操作员";
         Long prescriptionId = parsePrescriptionId(prescriptionIdStr);
+
+        DrugSplitCode splitCode = drugDao.getSplitByChildTraceCode(normalizedTraceCode);
+        if (splitCode != null) {
+            executeSplitDispense(splitCode, normalizedPatientId, prescriptionId, operator);
+            return;
+        }
 
         DrugStock drug = drugDao.getDrugByTraceCode(normalizedTraceCode);
         if (drug == null) {
@@ -32,12 +40,13 @@ public class DrugDispenseService {
             throw new IllegalStateException("该单品已被核销或库存状态异常");
         }
 
-        String operationType = prescriptionId != null ? "处方扫码发药" : "药房扫码出库";
+        String operationType = prescriptionId != null ? "处方扫码发药" : "药房质控出库";
 
-        drugDao.saveRecord(normalizedTraceCode, drug.getDrugName(), operationType, normalizedPatientId);
+        drugDao.saveRecord(normalizedTraceCode, drug.getDrugName(), operationType, normalizedPatientId + " 操作人:" + operator,
+                normalizedTraceCode, null, 1, safeText(drug.getPackageUnit(), "盒"), "WHOLE_PACKAGE");
 
         if (prescriptionId != null) {
-            int updated = drugDao.completePrescription(prescriptionId, normalizedTraceCode);
+            int updated = drugDao.completePrescription(prescriptionId, normalizedTraceCode, 1, safeText(drug.getPackageUnit(), "盒"));
             if (updated <= 0) {
                 throw new IllegalStateException("处方不存在或状态不是待发药");
             }
@@ -45,11 +54,18 @@ public class DrugDispenseService {
     }
 
     @Transactional(rollbackFor = Exception.class)
-    public void executeReturn(String prescriptionIdStr, String traceCode, String patientId, String drugName) {
+    public void executeReturn(String prescriptionIdStr, String traceCode, String patientId, String drugName, String operatorLabel) {
         Long prescriptionId = parseRequiredPrescriptionId(prescriptionIdStr);
         String normalizedTraceCode = requireText(traceCode, "追溯码不能为空");
         String normalizedDrugName = requireText(drugName, "药品名称不能为空");
         String normalizedPatientId = StringUtils.hasText(patientId) ? patientId.trim() : "";
+        String operator = StringUtils.hasText(operatorLabel) ? operatorLabel.trim() : "未知操作员";
+
+        DrugSplitCode splitCode = drugDao.getSplitByChildTraceCode(normalizedTraceCode);
+        if (splitCode != null) {
+            executeSplitReturn(splitCode, prescriptionId, normalizedPatientId, operator);
+            return;
+        }
 
         int restored = drugDao.restoreReturnedDrug(normalizedTraceCode);
         if (restored <= 0) {
@@ -61,7 +77,56 @@ public class DrugDispenseService {
             throw new IllegalStateException("退药失败：处方不存在或状态不是已发药");
         }
 
-        drugDao.saveRecord(normalizedTraceCode, normalizedDrugName, "【退药】患者退回", normalizedPatientId);
+        drugDao.saveRecord(normalizedTraceCode, normalizedDrugName, "【退药】患者退回", normalizedPatientId + " 操作人:" + operator,
+                normalizedTraceCode, null, 1, "盒", "WHOLE_PACKAGE");
+    }
+
+    private void executeSplitDispense(DrugSplitCode splitCode, String patientId, Long prescriptionId, String operator) {
+        if (!"AVAILABLE".equals(splitCode.getStatus())) {
+            throw new IllegalStateException("拆零子码状态不是可发药");
+        }
+        int updated = drugDao.markSplitDispensed(splitCode.getChildTraceCode(), patientId);
+        if (updated <= 0) {
+            throw new IllegalStateException("拆零子码已被处理，请刷新后重试");
+        }
+
+        drugDao.saveRecord(splitCode.getChildTraceCode(), splitCode.getDrugName(), "拆零扫码发药",
+                patientId + " 操作人:" + operator,
+                splitCode.getParentTraceCode(), splitCode.getChildTraceCode(),
+                splitCode.getSplitUnits(), splitCode.getMinUnit(), "SPLIT_PACKAGE");
+
+        if (prescriptionId != null) {
+            int prescriptionUpdated = drugDao.completePrescription(
+                    prescriptionId,
+                    splitCode.getChildTraceCode(),
+                    splitCode.getSplitUnits(),
+                    splitCode.getMinUnit()
+            );
+            if (prescriptionUpdated <= 0) {
+                throw new IllegalStateException("处方不存在或状态不是待发药");
+            }
+        }
+    }
+
+    private void executeSplitReturn(DrugSplitCode splitCode, Long prescriptionId, String patientId, String operator) {
+        if (!"DISPENSED".equals(splitCode.getStatus())) {
+            throw new IllegalStateException("拆零子码未发药或已处理，不能退药");
+        }
+        int returned = drugDao.markSplitReturned(splitCode.getChildTraceCode());
+        if (returned <= 0) {
+            throw new IllegalStateException("拆零退药失败：子码状态已变化");
+        }
+        drugDao.restoreParentMinUnits(splitCode.getParentTraceCode(), splitCode.getSplitUnits());
+
+        int prescriptionUpdated = drugDao.markPrescriptionReturned(prescriptionId);
+        if (prescriptionUpdated <= 0) {
+            throw new IllegalStateException("退药失败：处方不存在或状态不是已发药");
+        }
+
+        drugDao.saveRecord(splitCode.getChildTraceCode(), splitCode.getDrugName(), "【拆零退药】患者退回",
+                patientId + " 操作人:" + operator,
+                splitCode.getParentTraceCode(), splitCode.getChildTraceCode(),
+                splitCode.getSplitUnits(), splitCode.getMinUnit(), "SPLIT_PACKAGE");
     }
 
     private Long parsePrescriptionId(String prescriptionIdStr) {
@@ -85,5 +150,9 @@ public class DrugDispenseService {
             throw new IllegalArgumentException(message);
         }
         return value.trim();
+    }
+
+    private String safeText(String value, String fallback) {
+        return StringUtils.hasText(value) ? value.trim() : fallback;
     }
 }

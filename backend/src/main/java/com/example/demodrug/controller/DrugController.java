@@ -4,6 +4,8 @@ import com.example.demodrug.dao.DrugDao;
 import com.example.demodrug.entity.DispenseRecord;
 import com.example.demodrug.entity.DrugStock;
 import com.example.demodrug.entity.Prescription;
+import com.example.demodrug.security.CurrentUser;
+import com.example.demodrug.security.SecurityUtils;
 import com.example.demodrug.service.DrugAcceptanceService;
 import com.example.demodrug.service.DrugDispenseService;
 import org.springframework.http.HttpStatus;
@@ -11,6 +13,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
 import jakarta.annotation.Resource;
+import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -36,12 +40,7 @@ public class DrugController {
     @PostMapping("/add")
     public ResponseEntity<String> addDrug(@RequestBody DrugStock drug) {
         try {
-            String operatorId = "李药师";
-            if (drug != null && drug.getBatchNumber() != null && drug.getBatchNumber().contains("(入:")) {
-                operatorId = drug.getBatchNumber().substring(drug.getBatchNumber().indexOf("入:") + 2).replace(")", "");
-            }
-
-            drugAcceptanceService.scanAndAccept(drug, operatorId);
+            drugAcceptanceService.scanAndAccept(drug, SecurityUtils.currentUser().operatorLabel());
             return ResponseEntity.ok("入库成功");
         } catch (Exception e) {
             return fail("验收失败：" + e.getMessage(), e);
@@ -61,9 +60,13 @@ public class DrugController {
         String code = payload.get("traceCode");
         String patientId = payload.get("patientId");
         String pIdStr = payload.get("prescriptionId");
+        CurrentUser currentUser = SecurityUtils.currentUser();
 
         try {
-            drugDispenseService.executeDispense(code, patientId, pIdStr);
+            if (!StringUtils.hasText(pIdStr) && "NURSE".equals(currentUser.role())) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN).body("护士账号不能执行药库质控出库");
+            }
+            drugDispenseService.executeDispense(code, patientId, pIdStr, currentUser.operatorLabel());
             return ResponseEntity.ok("出库成功");
         } catch (Exception e) {
             return fail("失败：" + e.getMessage(), e);
@@ -78,7 +81,8 @@ public class DrugController {
                     payload.get("prescriptionId"),
                     payload.get("traceCode"),
                     payload.get("patientId"),
-                    payload.get("drugName")
+                    payload.get("drugName"),
+                    SecurityUtils.currentUser().operatorLabel()
             );
             return ResponseEntity.ok("退药成功");
         } catch (Exception e) {
@@ -101,6 +105,13 @@ public class DrugController {
         return drugDao.getAllRecords();
     }
 
+    @GetMapping("/records/recent")
+    public List<DispenseRecord> getRecentRecords(
+            @RequestParam(value = "limit", defaultValue = "40") int limit) {
+        int safeLimit = Math.max(1, Math.min(limit, 200));
+        return drugDao.getRecentRecords(safeLimit);
+    }
+
     // 8. 近效期预警接口
     @GetMapping("/nearExpiry")
     public List<DrugStock> getNearExpiry(
@@ -109,8 +120,39 @@ public class DrugController {
         return drugDao.findNearExpiry(safeDays);
     }
 
+    @GetMapping("/dashboard/summary")
+    public Map<String, Object> getDashboardSummary(
+            @RequestParam(value = "lowThreshold", defaultValue = "50") int lowThreshold,
+            @RequestParam(value = "expiryDays", defaultValue = "90") int expiryDays) {
+        return drugDao.getDashboardSummary(safeThreshold(lowThreshold), safeDays(expiryDays));
+    }
+
+    @GetMapping("/stock/status")
+    public Map<String, Object> getStockStatus(
+            @RequestParam(value = "lowThreshold", defaultValue = "50") int lowThreshold,
+            @RequestParam(value = "expiryDays", defaultValue = "90") int expiryDays) {
+        return drugDao.getStockStatus(safeThreshold(lowThreshold), safeDays(expiryDays));
+    }
+
+    @GetMapping("/health/db")
+    public Map<String, Object> getDbHealth() {
+        Map<String, Object> health = new HashMap<>();
+        health.put("status", "UP");
+        health.put("stockRows", drugDao.countStockRows());
+        health.put("checkedAt", LocalDateTime.now().toString());
+        return health;
+    }
+
     private ResponseEntity<String> fail(String message, Exception e) {
         HttpStatus status = e instanceof IllegalArgumentException ? HttpStatus.BAD_REQUEST : HttpStatus.CONFLICT;
         return ResponseEntity.status(status).body(message);
+    }
+
+    private int safeThreshold(int threshold) {
+        return Math.max(1, Math.min(threshold, 10000));
+    }
+
+    private int safeDays(int days) {
+        return Math.max(1, Math.min(days, 3650));
     }
 }

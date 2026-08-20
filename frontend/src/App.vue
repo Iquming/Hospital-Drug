@@ -2,6 +2,7 @@
 import { ref, onMounted, nextTick, computed, watch } from 'vue'
 import axios from 'axios'
 import * as echarts from 'echarts' 
+import loginPharmacyHero from './assets/login-pharmacy-hero.png'
 
 // --- 0. 基础配置 ---
 const api = axios.create({
@@ -13,14 +14,32 @@ const api = axios.create({
 const currentTab = ref('dashboard') 
 const loading = ref(false)          
 const notification = ref({ show: false, message: '', type: 'success' }) 
+const apiOnline = ref(false)
+const lastSyncedAt = ref('--')
 
-const currentUser = ref('李药师') 
-const userOptions = ['王护士', '李药师', '张主任']
+const authToken = ref(localStorage.getItem('hospitalDrugToken') || '')
+const authUser = ref(null)
+const loginForm = ref({ username: 'admin', password: '123456' })
+const loginLoading = ref(false)
+
+const roleLabels = { ADMIN: '管理员', PHARMACIST: '药师', NURSE: '护士' }
+const statusLabels = { ENABLED: '启用', DISABLED: '禁用' }
+const currentUser = computed(() => authUser.value?.displayName || authUser.value?.username || '未登录')
+const isAuthenticated = computed(() => Boolean(authToken.value && authUser.value))
+const isAdmin = computed(() => authUser.value?.role === 'ADMIN')
+const canUsePharmacy = computed(() => ['ADMIN', 'PHARMACIST'].includes(authUser.value?.role))
+const canUseNurse = computed(() => ['ADMIN', 'PHARMACIST', 'NURSE'].includes(authUser.value?.role))
+
+const userList = ref([])
+const userForm = ref({ id: null, username: '', password: '', displayName: '', role: 'NURSE', department: '', status: 'ENABLED' })
+const passwordForm = ref({ userId: null, password: '' })
 
 // --- 2. 核心数据 ---
 const drugList = ref([])   
 const recordList = ref([]) 
 const localFixMap = ref([]) 
+const dashboardSummary = ref({})
+const stockStatus = ref({})
 
 //  [批量退药] 用来存储每个药品想退的数量
 const returnInputs = ref({})
@@ -61,20 +80,41 @@ const uniqueDones = computed(() => {
 
 // --- 4. 药房管理数据 ---
 // ✅ 改动1：inboundForm 新增 expireDate 字段，用于入库时记录有效期
-const inboundForm = ref({ drugName: '', traceCode: '', batchNumber: '', quantity: 1, expireDate: '' })
+const inboundForm = ref({
+  drugName: '',
+  traceCode: '',
+  batchNumber: '',
+  quantity: 1,
+  expireDate: '',
+  isSplitAllowed: false,
+  packageUnit: '盒',
+  minUnit: '片',
+  minUnitsPerPackage: 1
+})
 const isCaseMode = ref(false) 
 const caseRatio = ref(20)     
 const pharmacyScanCode = ref('') 
-const outboundReason = ref('🔴 过期/破损报废')
+const outboundReason = ref('过期/破损报废')
 const outboundQty = ref(1)
+const splitForm = ref({ parentTraceCode: '', splitUnits: 1 })
+const lastSplitCode = ref(null)
 
 // --- 5. 图表逻辑 ---
 let pieChartInstance = null
 let barChartInstance = null
 
-const totalStock = computed(() => drugList.value.reduce((acc, cur) => acc + cur.quantity, 0))
-const lowStockCount = computed(() => drugList.value.filter(d => d.quantity < 50).length)
-const totalInbound = computed(() => drugList.value.length)
+const totalStock = computed(() => dashboardSummary.value.totalStock ?? drugList.value.reduce((acc, cur) => acc + (cur.quantity || 0), 0))
+const lowStockCount = computed(() => dashboardSummary.value.lowStockCount ?? drugList.value.filter(d => d.quantity > 0 && d.quantity < 50).length)
+const totalInbound = computed(() => dashboardSummary.value.skuCount ?? drugList.value.length)
+const inStockCount = computed(() => dashboardSummary.value.inStockCount ?? drugList.value.filter(d => d.quantity > 0).length)
+const outStockCount = computed(() => dashboardSummary.value.outStockCount ?? drugList.value.filter(d => d.quantity <= 0).length)
+const nearExpiryCount = computed(() => dashboardSummary.value.nearExpiryCount ?? nearExpiryList.value.length)
+const recentRecordCount = computed(() => dashboardSummary.value.recordCount ?? recordList.value.length)
+const operationHealth = computed(() => {
+  if (!apiOnline.value) return '接口待连接'
+  if (nearExpiryCount.value > 0 || lowStockCount.value > 0) return '需重点关注'
+  return '运行平稳'
+})
 
 // ✅ 改动2：新增近效期计算属性，90天内到期且库存>0的药品列表
 const nearExpiryList = computed(() => {
@@ -133,6 +173,155 @@ const showNotification = (msg, type = 'success') => {
   setTimeout(() => notification.value.show = false, 3000)
 }
 
+api.interceptors.request.use(config => {
+  if (authToken.value) {
+    config.headers.Authorization = `Bearer ${authToken.value}`
+  }
+  return config
+})
+
+api.interceptors.response.use(
+  response => response,
+  error => {
+    if (error.response?.status === 401) {
+      handleUnauthorized()
+    }
+    return Promise.reject(error)
+  }
+)
+
+const roleText = (role) => roleLabels[role] || role || '--'
+const statusText = (status) => statusLabels[status] || status || '--'
+
+const handleUnauthorized = () => {
+  localStorage.removeItem('hospitalDrugToken')
+  authToken.value = ''
+  authUser.value = null
+  currentTab.value = 'dashboard'
+  apiOnline.value = false
+}
+
+const login = async () => {
+  if (!loginForm.value.username || !loginForm.value.password) {
+    return showNotification('请输入用户名和密码', 'error')
+  }
+  loginLoading.value = true
+  try {
+    const res = await api.post('/auth/login', loginForm.value)
+    authToken.value = res.data.token
+    authUser.value = res.data.user
+    localStorage.setItem('hospitalDrugToken', authToken.value)
+    showNotification(`欢迎，${currentUser.value}`, 'success')
+    await refreshData()
+    if (isAdmin.value) await loadUsers()
+  } catch (e) {
+    showNotification(e.response?.data || '登录失败', 'error')
+  } finally {
+    loginLoading.value = false
+  }
+}
+
+const logout = async () => {
+  try {
+    if (authToken.value) await api.post('/auth/logout')
+  } catch (e) {
+    // 前端清理 token 即可完成退出。
+  }
+  handleUnauthorized()
+  showNotification('已退出登录', 'info')
+}
+
+const restoreSession = async () => {
+  if (!authToken.value) return
+  try {
+    const res = await api.get('/auth/me')
+    authUser.value = res.data.user
+    await refreshData()
+    if (isAdmin.value) await loadUsers()
+  } catch (e) {
+    handleUnauthorized()
+  }
+}
+
+const loadUsers = async () => {
+  if (!isAdmin.value) return
+  const res = await api.get('/users')
+  userList.value = res.data
+}
+
+const resetUserForm = () => {
+  userForm.value = { id: null, username: '', password: '', displayName: '', role: 'NURSE', department: '', status: 'ENABLED' }
+}
+
+const editUser = (user) => {
+  userForm.value = {
+    id: user.id,
+    username: user.username,
+    password: '',
+    displayName: user.displayName,
+    role: user.role,
+    department: user.department || '',
+    status: user.status
+  }
+}
+
+const saveUser = async () => {
+  try {
+    if (userForm.value.id) {
+      await api.put(`/users/${userForm.value.id}`, userForm.value)
+      showNotification('用户已更新', 'success')
+    } else {
+      await api.post('/users', userForm.value)
+      showNotification('用户已创建', 'success')
+    }
+    resetUserForm()
+    await loadUsers()
+  } catch (e) {
+    showNotification(e.response?.data || '用户保存失败', 'error')
+  }
+}
+
+const resetPassword = async (user) => {
+  if (!passwordForm.value.password || passwordForm.value.userId !== user.id) {
+    passwordForm.value = { userId: user.id, password: '' }
+    return
+  }
+  try {
+    await api.put(`/users/${user.id}/password`, { password: passwordForm.value.password })
+    passwordForm.value = { userId: null, password: '' }
+    showNotification('密码已重置', 'success')
+  } catch (e) {
+    showNotification(e.response?.data || '密码重置失败', 'error')
+  }
+}
+
+const disableUser = async (user) => {
+  if (!confirm(`确认禁用用户 ${user.displayName || user.username}？`)) return
+  try {
+    await api.delete(`/users/${user.id}`)
+    showNotification('用户已禁用', 'success')
+    await loadUsers()
+  } catch (e) {
+    showNotification(e.response?.data || '用户禁用失败', 'error')
+  }
+}
+
+const deleteUser = async (user) => {
+  if (!user?.id) return
+  if (user.id === authUser.value?.id) {
+    return showNotification('不能删除当前登录用户', 'error')
+  }
+  if (!confirm(`确认永久删除用户 ${user.displayName || user.username}？删除后不可恢复。`)) return
+  try {
+    await api.delete(`/users/${user.id}/hard`)
+    if (userForm.value.id === user.id) resetUserForm()
+    showNotification('用户已删除', 'success')
+    await loadUsers()
+  } catch (e) {
+    showNotification(e.response?.data || '用户删除失败', 'error')
+  }
+}
+
 const getLogName = (r) => {
   if (r.dispenseTime) {
     const serverTime = r.dispenseTime.split(' ')[1] 
@@ -178,14 +367,49 @@ const getDaysClass = (expireDateStr) => {
   return 'days-ok'
 }
 
+const packageText = (d) => {
+  const packageUnit = d.packageUnit || d.unit || '盒'
+  const minUnit = d.minUnit || packageUnit
+  const perPackage = d.minUnitsPerPackage || 1
+  if (perPackage <= 1 || packageUnit === minUnit) return packageUnit
+  return `1${packageUnit}=${perPackage}${minUnit}`
+}
+
+const splitStockText = (d) => {
+  if (!d.isSplitAllowed) return '整包装'
+  return `${d.remainingMinUnits ?? 0}/${d.minUnitsPerPackage ?? 1}${d.minUnit || '单位'}`
+}
+
+const verifyDispenseCode = async (code, expectedDrugName = '') => {
+  const res = await api.post('/device/scan/verify', {
+    scene: 'DISPENSE',
+    traceCode: code,
+    expectedDrugName
+  })
+  return res.data
+}
+
 const refreshData = async () => {
+  if (!authToken.value) return
   loading.value = true
   try {
-    const [resList, resRecords] = await Promise.all([api.get('/list'), api.get('/records')])
+    const [resList, resRecords, resSummary, resStatus] = await Promise.all([
+      api.get('/list'),
+      api.get('/records/recent?limit=50').catch(() => api.get('/records')),
+      api.get('/dashboard/summary').catch(() => ({ data: {} })),
+      api.get('/stock/status').catch(() => ({ data: {} }))
+    ])
     drugList.value = resList.data
     recordList.value = resRecords.data
+    dashboardSummary.value = resSummary.data || {}
+    stockStatus.value = resStatus.data || {}
+    apiOnline.value = true
+    lastSyncedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
     if(currentTab.value === 'dashboard') initCharts()
-  } catch (error) { showNotification('数据同步失败', 'error') } 
+  } catch (error) {
+    apiOnline.value = false
+    showNotification('数据同步失败，请检查后端服务和数据库', 'error')
+  } 
   finally { loading.value = false }
 }
 
@@ -216,15 +440,23 @@ const dispenseByNurse = async () => {
     alert("⚠️ 请先点击【查询】按钮！")
     return
   }
-  const drugInStock = drugList.value.find(d => d.traceCode === code)
-  if (!drugInStock) {
-    alert(`❌ 无效追溯码！\n库存中未找到此药盒。`)
+  let verifyResult
+  try {
+    verifyResult = await verifyDispenseCode(code)
+  } catch (e) {
+    alert(e.response?.data || '追溯码核对失败')
     return
   }
-  const prescription = todoPrescriptions.value.find(p => p.drugName === drugInStock.drugName)
+  if (verifyResult.suggestion === 'BLOCK') {
+    alert(`发药拦截：${verifyResult.message}`)
+    return
+  }
+
+  const scannedDrugName = verifyResult.codeType === 'CHILD' ? verifyResult.drug?.drugName : verifyResult.drug?.drugName
+  const prescription = todoPrescriptions.value.find(p => p.drugName === scannedDrugName)
   if (!prescription) {
     const needed = todoPrescriptions.value.map(p => p.drugName).join('、')
-    alert(`⛔ 发药错误拦截！\n\n❌ 扫码药品：${drugInStock.drugName}\n✅ 患者医嘱：${needed || '无'}\n\n药名不一致，严禁发药！`)
+    alert(`发药错误拦截！\n\n扫码药品：${scannedDrugName || '未知'}\n患者医嘱：${needed || '无'}\n\n药名不一致，严禁发药！`)
     return
   }
 
@@ -236,16 +468,18 @@ const dispenseByNurse = async () => {
       traceCode: code,
       patientId: bindInfo, 
       prescriptionId: prescription.id.toString(),
-      quantity: "1"
+      quantity: "1",
+      dispenseUnits: verifyResult.splitUnits ? String(verifyResult.splitUnits) : "1"
     })
     
     const resStr = typeof res.data === 'object' ? JSON.stringify(res.data) : String(res.data)
     if (res.status === 200 || resStr.includes("成功")) {
-      showNotification(`✅ 发药成功：${drugInStock.drugName}`, 'success')
+      const unitText = verifyResult.codeType === 'CHILD' ? `（拆零 ${verifyResult.splitUnits}${verifyResult.minUnit}）` : ''
+      showNotification(`✅ 发药成功：${scannedDrugName}${unitText}`, 'success')
       
       const now = new Date()
       const timeStr = `${now.getHours()}:${now.getMinutes()}:${now.getSeconds()}`.replace(/\b(\d)\b/g, '0$1')
-      localFixMap.value.push({ drugName: drugInStock.drugName, correctName: bindInfo, timeStr: timeStr })
+      localFixMap.value.push({ drugName: scannedDrugName, correctName: bindInfo, timeStr: timeStr })
 
       nurseScanCode.value = ''
       await checkPatient()
@@ -305,6 +539,70 @@ const returnByNurse = async (group) => {
   }
 }/*  */
 
+const directOutbound = async () => {
+  const code = pharmacyScanCode.value.trim()
+  if (!code) return showNotification('请扫描需要处理的药品追溯码', 'error')
+
+  const drugInStock = drugList.value.find(d => d.traceCode === code)
+  if (!drugInStock) {
+    showNotification('库存中未找到该追溯码，请先完成入库建档', 'error')
+    return
+  }
+  if ((drugInStock.quantity || 0) <= 0) {
+    showNotification('该单品已出库或库存状态异常', 'error')
+    return
+  }
+
+  const reason = outboundReason.value || '质控处理'
+  const operatorNote = `【质控】${reason} [${currentUser.value}]`
+
+  loading.value = true
+  try {
+    await api.post('/dispense', {
+      traceCode: code,
+      patientId: operatorNote,
+      quantity: String(outboundQty.value || 1)
+    })
+
+    const now = new Date()
+    const timeStr = `${now.getHours()}:${now.getMinutes()}:${now.getSeconds()}`.replace(/\b(\d)\b/g, '0$1')
+    localFixMap.value.push({ drugName: drugInStock.drugName, correctName: operatorNote, timeStr })
+    showNotification(`质控处理完成：${drugInStock.drugName}`, 'success')
+    pharmacyScanCode.value = ''
+    outboundQty.value = 1
+    await refreshData()
+  } catch (e) {
+    const message = e.response?.data || '质控处理失败'
+    showNotification(message, 'error')
+  } finally {
+    loading.value = false
+  }
+}
+
+const createSplitCode = async () => {
+  const parentTraceCode = splitForm.value.parentTraceCode.trim()
+  const splitUnits = parseInt(splitForm.value.splitUnits)
+  if (!parentTraceCode) return showNotification('请扫描母包装追溯码', 'error')
+  if (!splitUnits || splitUnits <= 0) return showNotification('请输入正确的拆零最小单位数量', 'error')
+
+  loading.value = true
+  try {
+    const res = await api.post('/split/create', {
+      parentTraceCode,
+      splitUnits: String(splitUnits)
+    })
+    lastSplitCode.value = res.data
+    splitForm.value.parentTraceCode = ''
+    splitForm.value.splitUnits = 1
+    showNotification(`拆零子码已生成：${res.data.childTraceCode}`, 'success')
+    await refreshData()
+  } catch (e) {
+    showNotification(e.response?.data || '拆零建码失败', 'error')
+  } finally {
+    loading.value = false
+  }
+}
+
 const quickAddDrug = async () => {
   if (!inboundForm.value.drugName || !inboundForm.value.traceCode) {
       return showNotification('信息不全，请输入药名和追溯码', 'error')
@@ -344,81 +642,154 @@ const quickAddDrug = async () => {
     showNotification('网络或服务器内部错误', 'error') 
   }
 }
-onMounted(() => refreshData())
+onMounted(() => restoreSession())
 </script>
 
 <template>
-  <div class="container">
+  <div>
     <div v-if="loading" class="loading-mask"><div class="spinner"></div></div>
     <div :class="['toast', notification.type, { show: notification.show }]">{{ notification.message }}</div>
 
-    <div class="header">
-      <div class="title-row">
-        <h1>🏥 医院药品闭环管理系统 <small>v3</small></h1>
-        <div class="user-select">
-          <span>当前操作员：</span>
-          <select v-model="currentUser"><option v-for="u in userOptions" :key="u">{{u}}</option></select>
+    <div v-if="!isAuthenticated" class="login-shell">
+      <div class="login-panel">
+        <div class="login-brand">
+          <span class="brand-kicker">Hospital Pharmacy Console</span>
+          <h1>医院药品闭环管理系统</h1>
+          <p>请输入院内账号进入药品闭环管理工作台。</p>
+          <div class="login-image-frame">
+            <img :src="loginPharmacyHero" alt="医院药房药品货架与扫码工作台" />
+          </div>
+        </div>
+        <div class="login-form">
+          <label>
+            <span>用户名</span>
+            <input v-model="loginForm.username" placeholder="admin" @keyup.enter="login" />
+          </label>
+          <label>
+            <span>密码</span>
+            <input v-model="loginForm.password" type="password" placeholder="123456" @keyup.enter="login" />
+          </label>
+          <button @click="login" class="btn-primary login-button" :disabled="loginLoading">
+            {{ loginLoading ? '正在登录...' : '登录系统' }}
+          </button>
         </div>
       </div>
-      <div class="tabs">
-        <button :class="{ active: currentTab === 'dashboard' }" @click="currentTab = 'dashboard'">📊 药库物资保障</button>
-        <button :class="{ active: currentTab === 'pharmacy' }" @click="currentTab = 'pharmacy'">💊 药房库存管理</button>
-        <button :class="{ active: currentTab === 'nurse' }" @click="currentTab = 'nurse'">👩‍⚕️ 药房医师</button>
+    </div>
+
+    <div v-else class="container">
+    <div class="header">
+      <div class="title-row">
+        <div class="brand-block">
+          <span class="brand-kicker">Hospital Pharmacy Console</span>
+          <h1>医院药品闭环管理系统 <small>院内版 v4</small></h1>
+        </div>
+        <div class="top-actions">
+          <span :class="['connection-pill', { offline: !apiOnline }]">● {{ apiOnline ? '数据已连接' : '接口待连接' }}</span>
+          <div class="user-profile">
+            <span>{{ roleText(authUser.role) }}</span>
+            <strong>{{ currentUser }}</strong>
+            <small>{{ authUser.department || '未设置科室' }}</small>
+          </div>
+          <button @click="logout" class="btn-logout">退出</button>
+        </div>
+      </div>
+      <div class="tabs nav-rail">
+        <button :class="{ active: currentTab === 'dashboard' }" @click="currentTab = 'dashboard'">院内总览</button>
+        <button v-if="canUsePharmacy" :class="{ active: currentTab === 'pharmacy' }" @click="currentTab = 'pharmacy'">药库质控</button>
+        <button v-if="canUseNurse" :class="{ active: currentTab === 'nurse' }" @click="currentTab = 'nurse'">调剂发药</button>
+        <button v-if="isAdmin" :class="{ active: currentTab === 'users' }" @click="currentTab = 'users'; loadUsers()">用户管理</button>
+      </div>
+    </div>
+
+    <div class="command-strip">
+      <div class="command-item">
+        <span>运行状态</span>
+        <strong>{{ operationHealth }}</strong>
+      </div>
+      <div class="command-item">
+        <span>最近同步</span>
+        <strong>{{ lastSyncedAt }}</strong>
+      </div>
+      <div class="command-item">
+        <span>库存分层</span>
+        <strong>正常 {{ stockStatus.normal ?? '--' }} / 预警 {{ lowStockCount + nearExpiryCount }}</strong>
+      </div>
+      <div class="command-item">
+        <span>流水总数</span>
+        <strong>{{ recentRecordCount }}</strong>
       </div>
     </div>
 
     <div v-if="currentTab === 'dashboard'" class="dashboard-layout">
       <div class="stat-cards">
-        <div class="card stat-blue"><h3>📦 药品总库存</h3><div class="num">{{ totalStock }} <small>盒</small></div></div>
-        <div class="card stat-green"><h3>📥 在库批次数</h3><div class="num">{{ totalInbound }} <small>批</small></div></div>
-        <div class="card stat-red"><h3>🚨 低库存预警</h3><div class="num">{{ lowStockCount }} <small>种</small></div></div>
+        <div class="card stat-blue"><h3>药品总库存</h3><div class="num">{{ totalStock }} <small>盒</small></div><p>覆盖 {{ totalInbound }} 条单品档案</p></div>
+        <div class="card stat-green"><h3>在库可调剂</h3><div class="num">{{ inStockCount }} <small>件</small></div><p>已出库 {{ outStockCount }} 件</p></div>
+        <div class="card stat-amber"><h3>近效期预警</h3><div class="num">{{ nearExpiryCount }} <small>件</small></div><p>90 天内到期需复核</p></div>
+        <div class="card stat-red"><h3>低库存预警</h3><div class="num">{{ lowStockCount }} <small>种</small></div><p>低于院内补货阈值</p></div>
       </div>
       <div class="charts-row">
         <div class="chart-box"><div id="stockPie" class="echart-container"></div></div>
         <div class="chart-box"><div id="trendBar" class="echart-container"></div></div>
       </div>
       <!-- 近效期预警列表，对应论文3.2.2节效期预警功能 -->
-      <div v-if="nearExpiryList.length > 0" class="expiry-alert-box">
-        <h3>⏰ 近效期预警（90天内到期）</h3>
-        <table>
-          <thead>
-            <tr>
-              <th>药品名称</th>
-              <th>追溯码</th>
-              <th>批号</th>
-              <th>库存</th>
-              <th>货数</th>
-              <th>有效期</th>
-              <th>剩余天数</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="d in nearExpiryList" :key="d.id">
-              <td>{{ d.drugName }}</td>
-              <td class="mono">{{ d.traceCode }}</td>
-              <td>{{ d.batchNumber }}</td>
-              <td :class="d.quantity < 50 ? 'low-stock' : 'normal-stock'">{{ d.quantity }}</td>
-              <td>{{ d.expireDate?.split('T')[0] || d.expireDate }}</td>
-              <td>
-                <span :class="getDaysClass(d.expireDate)">
-                  {{ getDaysLeft(d.expireDate) }} 天
-                </span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+      <div class="risk-board">
+        <div class="expiry-alert-box">
+          <h3>近效期重点复核（90天内到期）</h3>
+          <div v-if="nearExpiryList.length === 0" class="empty">暂无近效期预警</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>药品名称</th>
+                <th>追溯码</th>
+                <th>批号</th>
+                <th>库存</th>
+                <th>有效期</th>
+                <th>剩余天数</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="d in nearExpiryList" :key="d.id">
+                <td>{{ d.drugName }}</td>
+                <td class="mono">{{ d.traceCode }}</td>
+                <td>{{ d.batchNumber }}</td>
+                <td :class="d.quantity < 50 ? 'low-stock' : 'normal-stock'">{{ d.quantity }}</td>
+                <td>{{ d.expireDate?.split('T')[0] || d.expireDate }}</td>
+                <td>
+                  <span :class="getDaysClass(d.expireDate)">
+                    {{ getDaysLeft(d.expireDate) }} 天
+                  </span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="recent-card">
+          <h3>最近出入库流水</h3>
+          <div class="compact-log" v-for="r in recordList.slice(0, 8)" :key="r.id">
+            <span class="mono">{{r.dispenseTime?.split(' ')[1] || '--'}}</span>
+            <strong :class="getLogClass(getLogName(r))">{{ getLogName(r) }}</strong>
+            <span>{{r.drugName}}</span>
+          </div>
+          <div v-if="recordList.length === 0" class="empty">暂无流水记录</div>
+        </div>
       </div>
     </div>
 
     <div v-else-if="currentTab === 'pharmacy'" class="work-layout">
       <div class="action-panel">
         <div class="box in-box">
-          <div class="box-header"><h3>📥 快速入库 ({{currentUser}})</h3><label class="toggle"><input type="checkbox" v-model="isCaseMode"><span>整箱模式</span></label></div>
+          <div class="box-header"><h3>药品扫码入库 ({{currentUser}})</h3><label class="toggle"><input type="checkbox" v-model="isCaseMode"><span>整箱模式</span></label></div>
           <div class="form-grid">
             <input v-model="inboundForm.drugName" placeholder="药品名称" />
             <input v-model="inboundForm.batchNumber" placeholder="生产批号" />
             <!-- 入库表单新增有效期输入框，解决 expire_date 写 NOW() 的 Bug -->
             <input v-model="inboundForm.expireDate" type="date" placeholder="有效期" />
+            <label class="toggle split-toggle"><input type="checkbox" v-model="inboundForm.isSplitAllowed"><span>允许拆零</span></label>
+            <div class="row">
+              <input v-model="inboundForm.packageUnit" placeholder="整包装单位，如盒" />
+              <input v-model="inboundForm.minUnit" placeholder="最小单位，如片" />
+              <input v-model="inboundForm.minUnitsPerPackage" type="number" min="1" placeholder="每盒最小单位数" />
+            </div>
             <div class="row">
               <input v-model="inboundForm.quantity" type="number" placeholder="数量" />
               <input v-if="isCaseMode" v-model="caseRatio" type="number" placeholder="1箱=?" class="highlight-input"/>
@@ -428,9 +799,9 @@ onMounted(() => refreshData())
           </div>
         </div>
         <div class="box out-box">
-          <h3>🛡️ 质控与损耗 ({{currentUser}})</h3>
+          <h3>质量控制与损耗登记 ({{currentUser}})</h3>
           <div class="form-grid">
-            <select v-model="outboundReason"><option>🔴 过期/破损报废</option><option>🟠 科室基数药领用</option><option>🔵 库存盘点修正</option></select>
+            <select v-model="outboundReason"><option>过期/破损报废</option><option>科室基数药领用</option><option>库存盘点修正</option></select>
             <div class="row" style="display: flex; gap: 10px;">
               <input v-model="outboundQty" type="number" min="1" placeholder="数量" style="width: 100px; flex: none; text-align: center;"/>
               <input v-model="pharmacyScanCode" placeholder="扫码登记..." @keyup.enter="directOutbound" class="scan-input" style="flex: 1;"/>
@@ -438,14 +809,29 @@ onMounted(() => refreshData())
             <button @click="directOutbound" class="btn-warning">确认处理</button>
           </div>
         </div>
+        <div class="box split-box">
+          <h3>拆零建码 ({{currentUser}})</h3>
+          <div class="form-grid">
+            <input v-model="splitForm.parentTraceCode" placeholder="扫描母包装追溯码" @keyup.enter="createSplitCode" class="scan-input"/>
+            <div class="row" style="display: flex; gap: 10px;">
+              <input v-model="splitForm.splitUnits" type="number" min="1" placeholder="拆零数量" style="width: 120px; flex: none; text-align: center;"/>
+              <button @click="createSplitCode" class="btn-primary" style="flex: 1;">生成子码</button>
+            </div>
+            <div v-if="lastSplitCode" class="split-result">
+              <span>子码</span>
+              <strong class="mono">{{ lastSplitCode.childTraceCode }}</strong>
+              <small>{{ lastSplitCode.drugName }} · {{ lastSplitCode.splitUnits }}{{ lastSplitCode.minUnit }} · 母包装剩余 {{ lastSplitCode.remainingParentUnits }}{{ lastSplitCode.minUnit }}</small>
+            </div>
+          </div>
+        </div>
       </div>
       <div class="table-card">
-        <h3>📦 库存与质控明细</h3>
+        <h3>库存与质控明细</h3>
         <table>
-          <thead><tr><th>ID</th><th>药名</th><th>追溯码</th><th>货位</th><th>批号/操作人</th><th>货数</th><th>质控状态</th><th>更新时间</th></tr></thead>
+          <thead><tr><th>ID</th><th>药名</th><th>追溯码</th><th>包装规格</th><th>拆零库存</th><th>货位</th><th>批号/操作人</th><th>货数</th><th>质控状态</th><th>更新时间</th></tr></thead>
           <tbody>
             <tr v-for="d in drugList" :key="d.id">
-              <td>{{d.id}}</td><td>{{d.drugName}}</td><td class="mono">{{d.traceCode}}</td><td style="font-weight: bold; color: #8e44ad;">{{d.locationCode || '待上架'}}</td><td>{{d.batchNumber}}</td>
+              <td>{{d.id}}</td><td>{{d.drugName}}</td><td class="mono">{{d.traceCode}}</td><td>{{ packageText(d) }}</td><td>{{ splitStockText(d) }}</td><td style="font-weight: bold; color: #8e44ad;">{{d.locationCode || '待上架'}}</td><td>{{d.batchNumber}}</td>
               <td :class="d.quantity<50?'low-stock':'normal-stock'">{{d.quantity}}</td>
               <!-- 近效期相关函数，供库存明细表质控列和看板预警列表使用 -->
               <td>
@@ -459,7 +845,7 @@ onMounted(() => refreshData())
       </div>
     </div>
 
-    <div v-else class="work-layout nurse-layout">
+    <div v-else-if="currentTab === 'nurse'" class="work-layout nurse-layout">
       <div class="left-col">
         <div class="patient-search">
           <input v-model="patientIdInput" placeholder="患者ID (如 P001)" />
@@ -517,21 +903,121 @@ onMounted(() => refreshData())
         </div>
       </div>
     </div>
+
+    <div v-else-if="currentTab === 'users' && isAdmin" class="work-layout">
+      <div class="user-admin-layout">
+        <div class="box in-box">
+          <div class="box-header">
+            <h3>{{ userForm.id ? '编辑用户' : '新增用户' }}</h3>
+            <button v-if="userForm.id" @click="resetUserForm" class="btn-subtle">新建</button>
+          </div>
+          <div class="form-grid">
+            <input v-model="userForm.username" :disabled="Boolean(userForm.id)" placeholder="登录用户名" />
+            <input v-if="!userForm.id" v-model="userForm.password" type="password" placeholder="初始密码，至少 6 位" />
+            <input v-model="userForm.displayName" placeholder="姓名" />
+            <div class="row">
+              <select v-model="userForm.role">
+                <option value="ADMIN">管理员</option>
+                <option value="PHARMACIST">药师</option>
+                <option value="NURSE">护士</option>
+              </select>
+              <select v-model="userForm.status">
+                <option value="ENABLED">启用</option>
+                <option value="DISABLED">禁用</option>
+              </select>
+            </div>
+            <input v-model="userForm.department" placeholder="科室" />
+            <button @click="saveUser" class="btn-primary">{{ userForm.id ? '保存修改' : '创建用户' }}</button>
+            <button
+              v-if="userForm.id"
+              @click="deleteUser(userForm)"
+              class="btn-danger-wide"
+              :disabled="userForm.id === authUser.id"
+            >
+              删除该用户
+            </button>
+          </div>
+        </div>
+
+        <div class="table-card">
+          <h3>用户列表</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>用户名</th>
+                <th>姓名</th>
+                <th>角色</th>
+                <th>科室</th>
+                <th>状态</th>
+                <th>最近登录</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="u in userList" :key="u.id">
+                <td>{{ u.id }}</td>
+                <td class="mono">{{ u.username }}</td>
+                <td>{{ u.displayName }}</td>
+                <td><span class="badge blue-info">{{ roleText(u.role) }}</span></td>
+                <td>{{ u.department || '--' }}</td>
+                <td>
+                  <span :class="u.status === 'ENABLED' ? 'tag-ok' : 'tag-warn'">{{ statusText(u.status) }}</span>
+                </td>
+                <td class="time">{{ u.lastLoginTime || '--' }}</td>
+                <td>
+                  <div class="user-actions">
+                    <button @click="editUser(u)" class="btn-mini">编辑</button>
+                    <input v-if="passwordForm.userId === u.id" v-model="passwordForm.password" type="password" placeholder="新密码" class="mini-password" />
+                    <button @click="resetPassword(u)" class="btn-mini">{{ passwordForm.userId === u.id ? '确认' : '重置密码' }}</button>
+                    <button @click="disableUser(u)" class="btn-mini-danger" :disabled="u.id === authUser.id">禁用</button>
+                    <button @click="deleteUser(u)" class="btn-mini-danger hard" :disabled="u.id === authUser.id">删除</button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    </div>
   </div>
 </template>
 
 
 <style scoped>
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
 :global(*) {
   box-sizing: border-box;
+}
+
+:global(:root) {
+  --ink: #172033;
+  --muted: #607087;
+  --line: #dce6ef;
+  --page: #f2f6f8;
+  --panel: #ffffff;
+  --blue: #2454d6;
+  --blue-quiet: #e8efff;
+  --mint: #91cfc1;
+  --sage: #5a7c6a;
+  --rose: #e8a5b7;
+  --amber: #f2b95e;
+  --shadow: 0 18px 45px rgba(54, 74, 101, 0.12);
 }
 
 :global(body) {
   margin: 0;
   min-height: 100vh;
-  background: #eef3f8;
-  color: #182230;
-  font-family: Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+  background:
+    linear-gradient(135deg, rgba(168, 212, 196, 0.22) 0 17%, transparent 17% 100%),
+    linear-gradient(90deg, rgba(36, 84, 214, 0.035) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(36, 84, 214, 0.028) 1px, transparent 1px),
+    var(--page);
+  background-size: auto, 36px 36px, 36px 36px, auto;
+  color: var(--ink);
+  font-family: "Plus Jakarta Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
 :global(#app) {
@@ -541,17 +1027,107 @@ onMounted(() => refreshData())
 .container {
   width: min(1440px, calc(100vw - 40px));
   margin: 0 auto;
-  padding: 28px 0 40px;
+  padding: 30px 0 44px;
+}
+
+.login-shell {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 32px;
+}
+
+.login-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1.18fr) minmax(420px, 0.82fr);
+  width: min(1220px, calc(100vw - 96px));
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: var(--shadow);
+}
+
+.login-brand {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 620px;
+  padding: 56px;
+  background:
+    linear-gradient(135deg, rgba(36, 84, 214, 0.12), rgba(145, 207, 193, 0.24)),
+    #f8fbff;
+}
+
+.login-brand h1 {
+  margin: 22px 0 12px;
+  color: var(--ink);
+  font-size: 42px;
+  line-height: 1.18;
+  font-weight: 850;
+}
+
+.login-brand p {
+  max-width: 560px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.login-image-frame {
+  position: relative;
+  overflow: hidden;
+  margin-top: 34px;
+  border: 1px solid rgba(36, 84, 214, 0.14);
+  border-radius: 12px;
+  box-shadow: 0 18px 38px rgba(54, 74, 101, 0.16);
+}
+
+.login-image-frame img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 20px;
+  padding: 56px 48px;
+}
+
+.login-form label {
+  display: grid;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.login-form input {
+  min-height: 52px;
+  padding: 12px 14px;
+  font-size: 15px;
+}
+
+.login-button {
+  width: 100%;
+  min-height: 50px;
+  margin-top: 8px;
+  font-size: 15px;
 }
 
 .header {
   position: sticky;
   top: 0;
   z-index: 20;
-  margin-bottom: 22px;
-  padding: 18px 0 20px;
-  background: rgba(238, 243, 248, 0.9);
-  backdrop-filter: blur(14px);
+  margin-bottom: 24px;
+  padding: 18px 0 22px;
+  background: rgba(238, 245, 247, 0.86);
+  backdrop-filter: blur(16px) saturate(1.1);
 }
 
 .title-row {
@@ -562,35 +1138,98 @@ onMounted(() => refreshData())
   margin-bottom: 18px;
 }
 
+.brand-block {
+  display: grid;
+  gap: 6px;
+}
+
+.brand-kicker {
+  width: max-content;
+  padding: 5px 10px;
+  border: 1px solid rgba(36, 84, 214, 0.16);
+  border-radius: 999px;
+  background: rgba(255, 253, 249, 0.72);
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .title-row h1 {
   display: flex;
   align-items: center;
   gap: 12px;
   margin: 0;
-  color: #101828;
-  font-size: 28px;
+  color: var(--ink);
+  font-size: 30px;
   font-weight: 800;
   letter-spacing: 0;
 }
 
 .title-row h1 small {
-  color: #667085;
+  color: var(--muted);
   font-size: 13px;
   font-weight: 600;
 }
 
-.user-select {
+.top-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.connection-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 42px;
+  padding: 0 14px;
+  border: 1px solid rgba(18, 183, 106, 0.28);
+  border-radius: 999px;
+  background: #ecfdf3;
+  color: #067647;
+  font-size: 13px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.connection-pill.offline {
+  border-color: rgba(217, 45, 32, 0.25);
+  background: #fff1f0;
+  color: #b42318;
+}
+
+.user-select,
+.user-profile {
   display: flex;
   align-items: center;
   gap: 10px;
   min-width: 220px;
   padding: 12px 16px;
-  border: 1px solid #d9e2ec;
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: #fff;
-  box-shadow: 0 10px 24px rgba(16, 24, 40, 0.06);
-  color: #475467;
+  background: var(--panel);
+  box-shadow: 0 12px 28px rgba(54, 74, 101, 0.08);
+  color: var(--muted);
   font-size: 14px;
+}
+
+.user-profile {
+  min-width: 260px;
+}
+
+.user-profile span,
+.user-profile small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.user-profile strong {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 850;
 }
 
 .user-select select {
@@ -599,7 +1238,7 @@ onMounted(() => refreshData())
   padding: 4px 22px 4px 4px;
   border: 0;
   background: transparent;
-  color: #2454d6;
+  color: var(--blue);
   font-weight: 700;
   cursor: pointer;
 }
@@ -608,10 +1247,25 @@ onMounted(() => refreshData())
   display: inline-flex;
   gap: 6px;
   padding: 6px;
-  border: 1px solid #d9e2ec;
-  border-radius: 10px;
-  background: #fff;
-  box-shadow: 0 8px 22px rgba(16, 24, 40, 0.05);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 10px 24px rgba(54, 74, 101, 0.08);
+}
+
+.nav-rail {
+  position: relative;
+}
+
+.nav-rail::after {
+  content: "";
+  position: absolute;
+  right: -22px;
+  top: 6px;
+  width: 10px;
+  height: calc(100% - 12px);
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--rose), var(--mint), #9b8dc4);
 }
 
 .tabs button {
@@ -620,7 +1274,7 @@ onMounted(() => refreshData())
   border: 0;
   border-radius: 7px;
   background: transparent;
-  color: #475467;
+  color: var(--muted);
   font-size: 14px;
   font-weight: 700;
   letter-spacing: 0;
@@ -629,14 +1283,44 @@ onMounted(() => refreshData())
 }
 
 .tabs button:hover {
-  background: #f2f5f9;
-  color: #182230;
+  background: #f4f8fb;
+  color: var(--ink);
 }
 
 .tabs button.active {
-  background: #2454d6;
+  background: var(--blue);
   color: #fff;
   box-shadow: 0 8px 18px rgba(36, 84, 214, 0.24);
+}
+
+.command-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: -8px 0 22px;
+}
+
+.command-item {
+  display: grid;
+  gap: 6px;
+  min-height: 76px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 10px 22px rgba(54, 74, 101, 0.06);
+}
+
+.command-item span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.command-item strong {
+  color: var(--ink);
+  font-size: 17px;
+  font-weight: 850;
 }
 
 .dashboard-layout,
@@ -652,25 +1336,39 @@ onMounted(() => refreshData())
 
 .stat-cards {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 18px;
   margin-bottom: 18px;
 }
 
 .stat-cards .card {
+  position: relative;
+  overflow: hidden;
   min-height: 150px;
   padding: 24px;
   border: 1px solid rgba(255, 255, 255, 0.7);
-  border-radius: 8px;
+  border-radius: 10px;
   color: #fff;
-  box-shadow: 0 16px 34px rgba(16, 24, 40, 0.10);
+  box-shadow: var(--shadow);
+}
+
+.stat-cards .card::after {
+  content: "";
+  position: absolute;
+  right: 20px;
+  top: 18px;
+  width: 88px;
+  height: 18px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+  box-shadow: 0 30px 0 rgba(255, 255, 255, 0.14), 0 60px 0 rgba(255, 255, 255, 0.10);
 }
 
 .card h3 {
   margin: 0 0 20px;
   font-size: 15px;
   font-weight: 700;
-  opacity: 0.92;
+  opacity: 1;
 }
 
 .card .num {
@@ -687,9 +1385,19 @@ onMounted(() => refreshData())
   opacity: 0.85;
 }
 
-.stat-blue { background: linear-gradient(135deg, #2563eb 0%, #22a6b3 100%); }
-.stat-green { background: linear-gradient(135deg, #08966f 0%, #44bd87 100%); }
-.stat-red { background: linear-gradient(135deg, #e5484d 0%, #f97373 100%); }
+.stat-cards .card p {
+  position: relative;
+  z-index: 1;
+  margin: 16px 0 0;
+  color: rgba(255, 255, 255, 0.84);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.stat-blue { background: linear-gradient(135deg, #1745c8 0%, #0d8fa0 100%); }
+.stat-green { background: linear-gradient(135deg, #06724f 0%, #36ae8d 100%); }
+.stat-amber { background: linear-gradient(135deg, #b55f00 0%, #e7a848 100%); }
+.stat-red { background: linear-gradient(135deg, #c92f4f 0%, #ec819a 100%); }
 
 .charts-row {
   display: grid;
@@ -703,11 +1411,12 @@ onMounted(() => refreshData())
 .box,
 .left-col,
 .right-col,
-.expiry-alert-box {
+.expiry-alert-box,
+.recent-card {
   border: 1px solid #dfe7f0;
-  border-radius: 8px;
+  border-radius: 10px;
   background: #fff;
-  box-shadow: 0 12px 28px rgba(16, 24, 40, 0.06);
+  box-shadow: 0 14px 34px rgba(54, 74, 101, 0.08);
 }
 
 .chart-box {
@@ -722,20 +1431,42 @@ onMounted(() => refreshData())
 }
 
 .expiry-alert-box {
-  margin-top: 18px;
   padding: 20px;
-  border-left: 4px solid #e5484d;
+  border-left: 4px solid #d94860;
+}
+
+.risk-board {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(340px, 0.75fr);
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.recent-card {
+  padding: 20px;
+  border-left: 4px solid var(--blue);
 }
 
 .expiry-alert-box h3,
 .table-card h3,
 .right-col h3,
+.recent-card h3,
 .box h3,
 .task-list h4 {
   margin: 0 0 16px;
-  color: #182230;
+  color: var(--ink);
   font-size: 16px;
   font-weight: 800;
+}
+
+.compact-log {
+  display: grid;
+  grid-template-columns: 78px minmax(90px, 1fr) minmax(110px, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 11px 0;
+  border-bottom: 1px solid #edf1f5;
+  font-size: 13px;
 }
 
 .work-layout {
@@ -757,8 +1488,9 @@ onMounted(() => refreshData())
   padding: 20px;
 }
 
-.in-box { border-top: 4px solid #2454d6; }
-.out-box { border-top: 4px solid #f79009; }
+.in-box { border-top: 4px solid var(--blue); }
+.out-box { border-top: 4px solid var(--amber); }
+.split-box { border-top: 4px solid #12b76a; }
 
 .box-header {
   display: flex;
@@ -790,7 +1522,7 @@ select {
   border: 1px solid #cfd8e3;
   border-radius: 7px;
   background: #fff;
-  color: #182230;
+  color: var(--ink);
   font-size: 14px;
   outline: none;
   transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
@@ -803,7 +1535,7 @@ select:hover {
 
 input:focus,
 select:focus {
-  border-color: #2454d6;
+  border-color: var(--blue);
   box-shadow: 0 0 0 3px rgba(36, 84, 214, 0.13);
 }
 
@@ -811,7 +1543,7 @@ select:focus {
 .scan-input-lg,
 .highlight-input {
   border-color: #9bb4ff;
-  background: #f7f9ff;
+  background: linear-gradient(180deg, #fbfcff, #f3f7ff);
   font-weight: 650;
 }
 
@@ -822,7 +1554,10 @@ button {
 .btn-primary,
 .btn-warning,
 .btn-scan-confirm,
-.patient-search button {
+.patient-search button,
+.btn-logout,
+.btn-subtle,
+.btn-mini {
   min-height: 42px;
   border: 0;
   border-radius: 7px;
@@ -836,13 +1571,29 @@ button {
 .btn-primary,
 .btn-scan-confirm,
 .patient-search button {
-  background: #2454d6;
+  background: var(--blue);
   box-shadow: 0 8px 16px rgba(36, 84, 214, 0.22);
 }
 
 .btn-warning {
-  background: #d97706;
+  background: #c96f00;
   box-shadow: 0 8px 16px rgba(217, 119, 6, 0.22);
+}
+
+.btn-logout,
+.btn-subtle,
+.btn-mini {
+  padding: 0 14px;
+  border: 1px solid #d9e2ec;
+  background: #fff;
+  color: var(--ink);
+  box-shadow: none;
+}
+
+.btn-mini {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
 }
 
 .btn-primary:hover,
@@ -879,19 +1630,69 @@ button {
   border: 1px solid #d9e2ec;
   border-radius: 999px;
   background: #f6f8fb;
-  color: #475467;
+  color: var(--muted);
   font-size: 13px;
   font-weight: 700;
 }
 
 .toggle input:checked + span {
-  border-color: #2454d6;
-  background: #e8efff;
-  color: #2454d6;
+  border-color: var(--blue);
+  background: var(--blue-quiet);
+  color: var(--blue);
+}
+
+.split-toggle {
+  width: max-content;
+}
+
+.split-result {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #abefc6;
+  border-radius: 8px;
+  background: #ecfdf3;
+}
+
+.split-result span {
+  color: #067647;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.split-result small {
+  color: #344054;
+  font-weight: 700;
 }
 
 .table-card {
   overflow: hidden;
+}
+
+.user-admin-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.55fr) minmax(0, 1.45fr);
+  gap: 18px;
+}
+
+.user-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.mini-password {
+  width: 120px;
+  min-height: 30px;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+button:disabled,
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
 }
 
 table {
@@ -908,7 +1709,7 @@ th {
   z-index: 1;
   padding: 13px 14px;
   background: #f4f7fb;
-  color: #475467;
+  color: var(--muted);
   text-align: left;
   font-size: 12px;
   font-weight: 800;
@@ -933,7 +1734,7 @@ tbody tr:hover {
   border: 1px solid #dfe7f0;
   border-radius: 6px;
   background: #f8fafc;
-  color: #2454d6;
+  color: var(--blue);
   font-family: "Cascadia Mono", Consolas, monospace;
   font-size: 12px;
   font-weight: 700;
@@ -961,7 +1762,7 @@ tbody tr:hover {
 }
 
 .blue {
-  color: #2454d6;
+  color: var(--blue);
   font-weight: 800;
 }
 
@@ -1010,8 +1811,8 @@ tbody tr:hover {
 
 .badge.blue-info {
   border: 1px solid #b2ccff;
-  background: #eff4ff;
-  color: #2454d6;
+  background: var(--blue-quiet);
+  color: var(--blue);
 }
 
 .nurse-layout {
@@ -1080,7 +1881,7 @@ tbody tr:hover {
   padding: 14px;
   border: 1px dashed #9bb4ff;
   border-radius: 8px;
-  background: #f7f9ff;
+  background: linear-gradient(135deg, #f8fbff, #f1f7f4);
 }
 
 .scan-input-lg {
@@ -1113,6 +1914,22 @@ tbody tr:hover {
   box-shadow: 0 6px 12px rgba(217, 45, 32, 0.18);
 }
 
+.btn-mini-danger.hard {
+  background: #7f1d1d;
+}
+
+.btn-danger-wide {
+  min-height: 42px;
+  border: 0;
+  border-radius: 7px;
+  background: #7f1d1d;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 800;
+  cursor: pointer;
+  box-shadow: 0 8px 16px rgba(127, 29, 29, 0.18);
+}
+
 .logs {
   max-height: calc(100% - 48px);
   overflow: auto;
@@ -1133,7 +1950,7 @@ tbody tr:hover {
   border: 1px dashed #cfd8e3;
   border-radius: 8px;
   background: #f8fafc;
-  color: #667085;
+  color: var(--muted);
   text-align: center;
   font-weight: 700;
 }
@@ -1145,7 +1962,7 @@ tbody tr:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(238, 243, 248, 0.62);
+  background: rgba(238, 245, 247, 0.68);
   backdrop-filter: blur(4px);
 }
 
@@ -1153,7 +1970,7 @@ tbody tr:hover {
   width: 44px;
   height: 44px;
   border: 4px solid rgba(36, 84, 214, 0.14);
-  border-top-color: #2454d6;
+  border-top-color: var(--blue);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
@@ -1207,8 +2024,23 @@ tbody tr:hover {
 
   .charts-row,
   .action-panel,
+  .command-strip,
+  .risk-board,
+  .user-admin-layout,
+  .nurse-layout {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .charts-row,
+  .action-panel,
+  .risk-board,
+  .user-admin-layout,
   .nurse-layout {
     grid-template-columns: 1fr;
+  }
+
+  .stat-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .left-col,
@@ -1238,9 +2070,31 @@ tbody tr:hover {
     font-size: 22px;
   }
 
+  .brand-kicker {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .top-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .user-select,
+  .user-profile,
+  .connection-pill,
   .tabs {
     width: 100%;
+  }
+
+  .connection-pill {
+    justify-content: center;
+  }
+
+  .nav-rail::after {
+    display: none;
   }
 
   .tabs {
@@ -1253,6 +2107,10 @@ tbody tr:hover {
   }
 
   .stat-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .command-strip {
     grid-template-columns: 1fr;
   }
 
@@ -1289,6 +2147,41 @@ tbody tr:hover {
 
   .log-item {
     grid-template-columns: 1fr;
+  }
+
+  .compact-log {
+    grid-template-columns: 1fr;
+  }
+
+  .login-panel {
+    grid-template-columns: 1fr;
+    width: min(100%, 720px);
+  }
+
+  .login-brand {
+    min-height: auto;
+    padding: 28px;
+  }
+
+  .login-brand h1 {
+    font-size: 26px;
+  }
+
+  .login-form {
+    padding: 28px;
+  }
+
+  .login-form input {
+    min-height: 46px;
+  }
+
+  .user-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .mini-password {
+    width: 100%;
   }
 }
 </style>
