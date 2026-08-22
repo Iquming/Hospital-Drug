@@ -1,19 +1,27 @@
 package com.example.demodrug.dao;
 
+import com.example.demodrug.constant.PrescriptionStatus;
+import com.example.demodrug.constant.SplitCodeStatus;
+import com.example.demodrug.constant.StockStatus;
+import com.example.demodrug.constant.StockType;
 import com.example.demodrug.entity.DispenseRecord;
 import com.example.demodrug.entity.DrugSplitCode;
 import com.example.demodrug.entity.DrugStock;
 import com.example.demodrug.entity.Prescription;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.BeanPropertyRowMapper;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import jakarta.annotation.Resource;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 @Repository
 public class DrugDao {
@@ -23,16 +31,16 @@ public class DrugDao {
 
     // 1. 保存/入库
     public void saveDrug(DrugStock drug) {
-        String autoDrugCode = "DRUG-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+        String autoDrugCode = nextDrugCode();
         boolean splitAllowed = Boolean.TRUE.equals(drug.getIsSplitAllowed());
         int minUnitsPerPackage = safePositive(drug.getMinUnitsPerPackage(), 1);
         int remainingMinUnits = splitAllowed ? minUnitsPerPackage : safePositive(drug.getQuantity(), 1);
         String packageUnit = safeText(drug.getPackageUnit(), "盒");
         String minUnit = safeText(drug.getMinUnit(), splitAllowed ? "片" : packageUnit);
-        String stockType = splitAllowed ? "SPLIT_PARENT" : "WHOLE";
+        String stockType = splitAllowed ? StockType.SPLIT_PARENT : StockType.WHOLE;
         String sql = "INSERT INTO drug_stock (drug_name, drug_code, trace_code, batch_number, quantity, expire_date, create_time, " +
-                "is_split_allowed, package_unit, min_unit, min_units_per_package, remaining_min_units, stock_type) " +
-                "VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?)";
+                "is_split_allowed, package_unit, min_unit, min_units_per_package, remaining_min_units, stock_type, status, version) " +
+                "VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, 0)";
         String finalExpireDate = drug.getExpireDate();
         if (finalExpireDate != null && finalExpireDate.trim().isEmpty()) {
             finalExpireDate = null;
@@ -49,7 +57,8 @@ public class DrugDao {
                 minUnit,
                 minUnitsPerPackage,
                 remainingMinUnits,
-                stockType);
+                stockType,
+                StockStatus.IN_STOCK);
     }
 
     // 2. 查询所有库存
@@ -60,12 +69,13 @@ public class DrugDao {
 
     // 3. 单品核销/减库存
     public int dispenseDrug(String traceCode) {
-        String sql = "UPDATE drug_stock SET quantity = 0, remaining_min_units = 0, update_time = NOW() " +
+        String sql = "UPDATE drug_stock SET status = ?, quantity = 0, remaining_min_units = 0, version = version + 1, update_time = NOW() " +
                 "WHERE trace_code = ? " +
+                "AND status = ? " +
                 "AND quantity = 1 " +
-                "AND (COALESCE(stock_type, 'WHOLE') <> 'SPLIT_PARENT' " +
+                "AND (COALESCE(stock_type, ?) <> ? " +
                 "OR COALESCE(remaining_min_units, 0) >= COALESCE(min_units_per_package, 1))";
-        return jdbcTemplate.update(sql, traceCode);
+        return jdbcTemplate.update(sql, StockStatus.DISPENSED, traceCode, StockStatus.IN_STOCK, StockType.WHOLE, StockType.SPLIT_PARENT);
     }
 
     // 4. 查单个药 (根据追溯码)
@@ -123,28 +133,38 @@ public class DrugDao {
         return jdbcTemplate.query(sql, new BeanPropertyRowMapper<>(Prescription.class), patientId, status);
     }
 
+    public Prescription findPrescriptionById(Long prescriptionId) {
+        try {
+            String sql = "SELECT * FROM prescription WHERE id = ? LIMIT 1";
+            return jdbcTemplate.queryForObject(sql, new BeanPropertyRowMapper<>(Prescription.class), prescriptionId);
+        } catch (EmptyResultDataAccessException e) {
+            return null;
+        }
+    }
+
     // 9. 核销处方 (发药时调用)
     public int completePrescription(Long prescriptionId, String traceCode) {
-        String sql = "UPDATE prescription SET status = '已发药', trace_code_dispensed = ? WHERE id = ? AND status = '待发药'";
-        return jdbcTemplate.update(sql, traceCode, prescriptionId);
+        String sql = "UPDATE prescription SET status = ?, trace_code_dispensed = ? WHERE id = ? AND status = ?";
+        return jdbcTemplate.update(sql, PrescriptionStatus.DISPENSED, traceCode, prescriptionId, PrescriptionStatus.PENDING);
     }
 
     public int completePrescription(Long prescriptionId, String traceCode, Integer dispensedUnits, String dispenseUnit) {
-        String sql = "UPDATE prescription SET status = '已发药', trace_code_dispensed = ?, dispensed_units = ?, dispense_unit = ? " +
-                "WHERE id = ? AND status = '待发药'";
-        return jdbcTemplate.update(sql, traceCode, dispensedUnits, dispenseUnit, prescriptionId);
+        String sql = "UPDATE prescription SET status = ?, trace_code_dispensed = ?, dispensed_units = ?, dispense_unit = ? " +
+                "WHERE id = ? AND status = ?";
+        return jdbcTemplate.update(sql, PrescriptionStatus.DISPENSED, traceCode, dispensedUnits, dispenseUnit, prescriptionId, PrescriptionStatus.PENDING);
     }
 
     // 10. 处理单品退药
     public int restoreReturnedDrug(String traceCode) {
-        String sql = "UPDATE drug_stock SET quantity = 1, remaining_min_units = COALESCE(min_units_per_package, 1), update_time = NOW() " +
-                "WHERE trace_code = ? AND quantity = 0";
-        return jdbcTemplate.update(sql, traceCode);
+        String sql = "UPDATE drug_stock SET status = ?, quantity = 1, remaining_min_units = COALESCE(min_units_per_package, 1), " +
+                "version = version + 1, update_time = NOW() " +
+                "WHERE trace_code = ? AND status = ?";
+        return jdbcTemplate.update(sql, StockStatus.IN_STOCK, traceCode, StockStatus.DISPENSED);
     }
 
     public int markPrescriptionReturned(Long prescriptionId) {
-        String sql = "UPDATE prescription SET status = '已退药' WHERE id = ? AND status = '已发药'";
-        return jdbcTemplate.update(sql, prescriptionId);
+        String sql = "UPDATE prescription SET status = ? WHERE id = ? AND status = ?";
+        return jdbcTemplate.update(sql, PrescriptionStatus.RETURNED, prescriptionId, PrescriptionStatus.DISPENSED);
     }
 
     public DrugSplitCode getSplitByChildTraceCode(String childTraceCode) {
@@ -161,21 +181,22 @@ public class DrugDao {
     }
 
     public int reserveParentMinUnits(String parentTraceCode, int splitUnits) {
-        String sql = "UPDATE drug_stock SET remaining_min_units = remaining_min_units - ?, update_time = NOW() " +
-                "WHERE trace_code = ? AND is_split_allowed = 1 AND remaining_min_units >= ?";
-        return jdbcTemplate.update(sql, splitUnits, parentTraceCode, splitUnits);
+        String sql = "UPDATE drug_stock SET remaining_min_units = remaining_min_units - ?, version = version + 1, update_time = NOW() " +
+                "WHERE trace_code = ? AND status = ? AND is_split_allowed = 1 AND remaining_min_units >= ?";
+        return jdbcTemplate.update(sql, splitUnits, parentTraceCode, StockStatus.IN_STOCK, splitUnits);
     }
 
     public int restoreParentMinUnits(String parentTraceCode, int splitUnits) {
-        String sql = "UPDATE drug_stock SET remaining_min_units = remaining_min_units + ?, quantity = 1, update_time = NOW() " +
-                "WHERE trace_code = ?";
-        return jdbcTemplate.update(sql, splitUnits, parentTraceCode);
+        String sql = "UPDATE drug_stock SET status = ?, remaining_min_units = remaining_min_units + ?, quantity = 1, " +
+                "version = version + 1, update_time = NOW() " +
+                "WHERE trace_code = ? AND status IN (?, ?)";
+        return jdbcTemplate.update(sql, StockStatus.IN_STOCK, splitUnits, parentTraceCode, StockStatus.IN_STOCK, StockStatus.DISPENSED);
     }
 
     public void saveSplitCode(DrugSplitCode splitCode) {
         String sql = "INSERT INTO drug_split_code (parent_trace_code, child_trace_code, drug_name, batch_number, min_unit, " +
-                "split_units, remaining_units, status, created_by, create_time, update_time) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 'AVAILABLE', ?, NOW(), NOW())";
+                "split_units, remaining_units, status, version, created_by, create_time, update_time) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NOW(), NOW())";
         jdbcTemplate.update(sql,
                 splitCode.getParentTraceCode(),
                 splitCode.getChildTraceCode(),
@@ -184,20 +205,21 @@ public class DrugDao {
                 splitCode.getMinUnit(),
                 splitCode.getSplitUnits(),
                 splitCode.getRemainingUnits(),
+                SplitCodeStatus.AVAILABLE,
                 splitCode.getCreatedBy());
     }
 
     public int markSplitDispensed(String childTraceCode, String patientId) {
-        String sql = "UPDATE drug_split_code SET status = 'DISPENSED', remaining_units = 0, " +
+        String sql = "UPDATE drug_split_code SET status = ?, remaining_units = 0, version = version + 1, " +
                 "dispensed_to_patient_id = ?, dispensed_time = NOW(), update_time = NOW() " +
-                "WHERE child_trace_code = ? AND status = 'AVAILABLE'";
-        return jdbcTemplate.update(sql, patientId, childTraceCode);
+                "WHERE child_trace_code = ? AND status = ?";
+        return jdbcTemplate.update(sql, SplitCodeStatus.DISPENSED, patientId, childTraceCode, SplitCodeStatus.AVAILABLE);
     }
 
     public int markSplitReturned(String childTraceCode) {
-        String sql = "UPDATE drug_split_code SET status = 'RETURNED', remaining_units = split_units, update_time = NOW() " +
-                "WHERE child_trace_code = ? AND status = 'DISPENSED'";
-        return jdbcTemplate.update(sql, childTraceCode);
+        String sql = "UPDATE drug_split_code SET status = ?, remaining_units = split_units, version = version + 1, update_time = NOW() " +
+                "WHERE child_trace_code = ? AND status = ?";
+        return jdbcTemplate.update(sql, SplitCodeStatus.RETURNED, childTraceCode, SplitCodeStatus.DISPENSED);
     }
 
     // ✅ 新增：查询近效期药品（默认90天内到期且库存>0，按效期升序）
@@ -209,6 +231,19 @@ public class DrugDao {
                 "AND quantity > 0 " +
                 "ORDER BY expire_date ASC";
         return jdbcTemplate.query(sql, new BeanPropertyRowMapper<>(DrugStock.class), days);
+    }
+
+    public List<DrugStock> findFifoCandidates(String drugName, int limit) {
+        String sql = "SELECT * FROM drug_stock " +
+                "WHERE drug_name = ? AND quantity > 0 " +
+                "ORDER BY expire_date IS NULL ASC, expire_date ASC, create_time ASC " +
+                "LIMIT ?";
+        return jdbcTemplate.query(sql, new BeanPropertyRowMapper<>(DrugStock.class), drugName, limit);
+    }
+
+    public List<DrugSplitCode> findAvailableSplitCodes(int limit) {
+        String sql = "SELECT * FROM drug_split_code WHERE status = ? ORDER BY create_time ASC LIMIT ?";
+        return jdbcTemplate.query(sql, new BeanPropertyRowMapper<>(DrugSplitCode.class), SplitCodeStatus.AVAILABLE, limit);
     }
 
     public Map<String, Object> getDashboardSummary(int lowThreshold, int expiryDays) {
@@ -261,6 +296,28 @@ public class DrugDao {
     private int queryInt(String sql, Object... args) {
         Integer value = jdbcTemplate.queryForObject(sql, Integer.class, args);
         return value == null ? 0 : value;
+    }
+
+    public String nextDrugCode() {
+        String bizDate = LocalDate.now().format(DateTimeFormatter.BASIC_ISO_DATE);
+        String upsertSql = "INSERT INTO drug_code_sequence (biz_date, current_value) " +
+                "VALUES (?, LAST_INSERT_ID(1)) " +
+                "ON DUPLICATE KEY UPDATE current_value = LAST_INSERT_ID(current_value + 1), update_time = NOW()";
+
+        Long sequence = jdbcTemplate.execute((ConnectionCallback<Long>) connection -> {
+            try (PreparedStatement statement = connection.prepareStatement(upsertSql)) {
+                statement.setString(1, bizDate);
+                statement.executeUpdate();
+            }
+            try (PreparedStatement statement = connection.prepareStatement("SELECT LAST_INSERT_ID()");
+                 ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? resultSet.getLong(1) : null;
+            }
+        });
+        if (sequence == null || sequence <= 0) {
+            throw new IllegalStateException("药品流水号生成失败");
+        }
+        return "DRUG-" + bizDate + "-" + String.format("%05d", sequence);
     }
 
     private int safePositive(Integer value, int fallback) {

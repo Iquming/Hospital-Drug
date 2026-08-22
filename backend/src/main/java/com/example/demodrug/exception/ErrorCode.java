@@ -1,0 +1,12 @@
+package com.example.demodrug.exception;
+
+public enum ErrorCode {
+    TRACE_CODE_DUPLICATED,
+    STOCK_CONFLICT,
+    INVALID_STATE_TRANSITION,
+    PRESCRIPTION_MISMATCH,
+    IDEMPOTENT_REPLAY,
+    IDEMPOTENT_PROCESSING,
+    IDEMPOTENT_CONFLICT,
+    BAD_REQUEST
+}

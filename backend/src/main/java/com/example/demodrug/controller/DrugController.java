@@ -1,13 +1,17 @@
 package com.example.demodrug.controller;
 
 import com.example.demodrug.dao.DrugDao;
+import com.example.demodrug.constant.DispenseOperation;
+import com.example.demodrug.constant.PrescriptionStatus;
 import com.example.demodrug.entity.DispenseRecord;
 import com.example.demodrug.entity.DrugStock;
 import com.example.demodrug.entity.Prescription;
 import com.example.demodrug.security.CurrentUser;
 import com.example.demodrug.security.SecurityUtils;
+import com.example.demodrug.exception.BusinessException;
 import com.example.demodrug.service.DrugAcceptanceService;
 import com.example.demodrug.service.DrugDispenseService;
+import com.example.demodrug.service.IdempotencyService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.util.StringUtils;
@@ -30,6 +34,9 @@ public class DrugController {
     @Resource
     private DrugDispenseService drugDispenseService;
 
+    @Resource
+    private IdempotencyService idempotencyService;
+
     // 1. 获取库存列表
     @GetMapping("/list")
     public List<DrugStock> getDrugList() {
@@ -38,10 +45,26 @@ public class DrugController {
 
     // 2. 入库接口
     @PostMapping("/add")
-    public ResponseEntity<String> addDrug(@RequestBody DrugStock drug) {
+    public ResponseEntity<?> addDrug(@RequestBody DrugStock drug,
+                                     @RequestParam(value = "requestId", required = false) String requestId) {
         try {
-            drugAcceptanceService.scanAndAccept(drug, SecurityUtils.currentUser().operatorLabel());
-            return ResponseEntity.ok("入库成功");
+            String effectiveRequestId = StringUtils.hasText(requestId) ? requestId : drug == null ? null : drug.getRequestId();
+            String operator = SecurityUtils.currentUser().operatorLabel();
+            String result = idempotencyService.execute(
+                    effectiveRequestId,
+                    DispenseOperation.DRUG_INBOUND,
+                    drug == null ? null : drug.getTraceCode(),
+                    operator,
+                    drugPayload(drug),
+                    () -> {
+                        drugAcceptanceService.scanAndAccept(drug, operator);
+                        return "入库成功";
+                    },
+                    String.class
+            );
+            return ResponseEntity.ok(result);
+        } catch (BusinessException e) {
+            throw e;
         } catch (Exception e) {
             return fail("验收失败：" + e.getMessage(), e);
         }
@@ -50,24 +73,38 @@ public class DrugController {
     // 3. 查处方接口
     @GetMapping("/prescriptions")
     public List<Prescription> getPrescriptions(@RequestParam("patientId") String patientId,
-                                               @RequestParam(value = "status", defaultValue = "待发药") String status) {
+                                               @RequestParam(value = "status", defaultValue = PrescriptionStatus.PENDING) String status) {
         return drugDao.findPrescriptionsByPatient(patientId, status);
     }
 
     // 4. 发药/出库接口
     @PostMapping("/dispense")
-    public ResponseEntity<String> dispense(@RequestBody Map<String, String> payload) {
+    public ResponseEntity<?> dispense(@RequestBody Map<String, String> payload) {
         String code = payload.get("traceCode");
         String patientId = payload.get("patientId");
         String pIdStr = payload.get("prescriptionId");
+        String requestId = payload.get("requestId");
         CurrentUser currentUser = SecurityUtils.currentUser();
 
         try {
             if (!StringUtils.hasText(pIdStr) && "NURSE".equals(currentUser.role())) {
                 return ResponseEntity.status(HttpStatus.FORBIDDEN).body("护士账号不能执行药库质控出库");
             }
-            drugDispenseService.executeDispense(code, patientId, pIdStr, currentUser.operatorLabel());
-            return ResponseEntity.ok("出库成功");
+            String result = idempotencyService.execute(
+                    requestId,
+                    "DRUG_DISPENSE",
+                    code,
+                    currentUser.operatorLabel(),
+                    payload,
+                    () -> {
+                        drugDispenseService.executeDispense(code, patientId, pIdStr, currentUser.operatorLabel());
+                        return "出库成功";
+                    },
+                    String.class
+            );
+            return ResponseEntity.ok(result);
+        } catch (BusinessException e) {
+            throw e;
         } catch (Exception e) {
             return fail("失败：" + e.getMessage(), e);
         }
@@ -75,16 +112,30 @@ public class DrugController {
 
     // 5. 处方退药接口
     @PostMapping("/return")
-    public ResponseEntity<String> returnByPrescription(@RequestBody Map<String, String> payload) {
+    public ResponseEntity<?> returnByPrescription(@RequestBody Map<String, String> payload) {
         try {
-            drugDispenseService.executeReturn(
-                    payload.get("prescriptionId"),
+            String operator = SecurityUtils.currentUser().operatorLabel();
+            String result = idempotencyService.execute(
+                    payload.get("requestId"),
+                    "DRUG_RETURN",
                     payload.get("traceCode"),
-                    payload.get("patientId"),
-                    payload.get("drugName"),
-                    SecurityUtils.currentUser().operatorLabel()
+                    operator,
+                    payload,
+                    () -> {
+                        drugDispenseService.executeReturn(
+                                payload.get("prescriptionId"),
+                                payload.get("traceCode"),
+                                payload.get("patientId"),
+                                payload.get("drugName"),
+                                operator
+                        );
+                        return "退药成功";
+                    },
+                    String.class
             );
-            return ResponseEntity.ok("退药成功");
+            return ResponseEntity.ok(result);
+        } catch (BusinessException e) {
+            throw e;
         } catch (Exception e) {
             return fail("退药失败：" + e.getMessage(), e);
         }
@@ -146,6 +197,22 @@ public class DrugController {
     private ResponseEntity<String> fail(String message, Exception e) {
         HttpStatus status = e instanceof IllegalArgumentException ? HttpStatus.BAD_REQUEST : HttpStatus.CONFLICT;
         return ResponseEntity.status(status).body(message);
+    }
+
+    private Map<String, Object> drugPayload(DrugStock drug) {
+        Map<String, Object> payload = new HashMap<>();
+        if (drug == null) {
+            return payload;
+        }
+        payload.put("drugName", drug.getDrugName());
+        payload.put("traceCode", drug.getTraceCode());
+        payload.put("batchNumber", drug.getBatchNumber());
+        payload.put("expireDate", drug.getExpireDate());
+        payload.put("isSplitAllowed", drug.getIsSplitAllowed());
+        payload.put("packageUnit", drug.getPackageUnit());
+        payload.put("minUnit", drug.getMinUnit());
+        payload.put("minUnitsPerPackage", drug.getMinUnitsPerPackage());
+        return payload;
     }
 
     private int safeThreshold(int threshold) {

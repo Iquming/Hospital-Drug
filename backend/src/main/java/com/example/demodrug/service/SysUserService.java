@@ -22,6 +22,9 @@ public class SysUserService {
     @Resource
     private PasswordEncoder passwordEncoder;
 
+    @Resource
+    private AuditLogService auditLogService;
+
     public List<SysUser> listUsers() {
         return sysUserDao.findAll();
     }
@@ -38,6 +41,7 @@ public class SysUserService {
         user.setUsername(user.getUsername().trim());
         user.setPasswordHash(passwordEncoder.encode(password));
         sysUserDao.createUser(user);
+        auditLogService.record("USER_CREATE", "sys_user", user.getUsername(), null, user.getRole(), "SUCCESS", "新增用户");
     }
 
     public void updateUser(Long id, SysUser user) {
@@ -49,6 +53,7 @@ public class SysUserService {
         if (updated <= 0) {
             throw new IllegalStateException("用户更新失败");
         }
+        auditLogService.record("USER_UPDATE", "sys_user", String.valueOf(id), null, user.getRole() + "/" + user.getStatus(), "SUCCESS", "编辑用户");
     }
 
     public void resetPassword(Long id, String rawPassword) {
@@ -60,12 +65,14 @@ public class SysUserService {
             throw new IllegalArgumentException("密码至少 6 位");
         }
         sysUserDao.updatePassword(id, passwordEncoder.encode(password));
+        auditLogService.record("USER_PASSWORD_RESET", "sys_user", String.valueOf(id), null, null, "SUCCESS", "重置用户密码");
     }
 
     public void disableUser(Long id) {
         if (sysUserDao.disableUser(id) <= 0) {
             throw new IllegalArgumentException("用户不存在");
         }
+        auditLogService.record("USER_DISABLE", "sys_user", String.valueOf(id), "ENABLED", "DISABLED", "SUCCESS", "禁用用户");
     }
 
     public void deleteUser(Long id, Long currentUserId) {
@@ -75,6 +82,7 @@ public class SysUserService {
         if (sysUserDao.deleteUser(id) <= 0) {
             throw new IllegalArgumentException("用户不存在");
         }
+        auditLogService.record("USER_DELETE", "sys_user", String.valueOf(id), null, null, "SUCCESS", "删除用户");
     }
 
     private void validateUser(SysUser user) {

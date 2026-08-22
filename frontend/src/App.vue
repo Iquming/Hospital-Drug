@@ -25,6 +25,16 @@ const loginLoading = ref(false)
 const roleLabels = { ADMIN: '管理员', PHARMACIST: '药师', NURSE: '护士' }
 const statusLabels = { ENABLED: '启用', DISABLED: '禁用' }
 const currentUser = computed(() => authUser.value?.displayName || authUser.value?.username || '未登录')
+const userInitial = computed(() => currentUser.value.slice(0, 1).toUpperCase())
+const activeModuleName = computed(() => ({
+  dashboard: '院内总览',
+  pharmacy: '药库质控',
+  nurse: '调剂发药',
+  catalog: '药品档案',
+  inventory: '库存盘点',
+  audit: '审计报表',
+  users: '用户管理'
+}[currentTab.value] || '院内总览'))
 const isAuthenticated = computed(() => Boolean(authToken.value && authUser.value))
 const isAdmin = computed(() => authUser.value?.role === 'ADMIN')
 const canUsePharmacy = computed(() => ['ADMIN', 'PHARMACIST'].includes(authUser.value?.role))
@@ -98,6 +108,27 @@ const outboundReason = ref('过期/破损报废')
 const outboundQty = ref(1)
 const splitForm = ref({ parentTraceCode: '', splitUnits: 1 })
 const lastSplitCode = ref(null)
+
+const enhancedAlerts = ref({ lowStock: [], expired: [], availableSplitCodes: [], longIdleStock: [] })
+const catalogList = ref([])
+const catalogForm = ref({
+  id: null,
+  drugName: '',
+  specification: '',
+  dosageForm: '',
+  manufacturer: '',
+  isSplitAllowed: false,
+  packageUnit: '盒',
+  minUnit: '盒',
+  minUnitsPerPackage: 1,
+  lowStockThreshold: 50,
+  status: 'ENABLED'
+})
+const inventoryList = ref([])
+const inventoryItems = ref([])
+const inventoryForm = ref({ title: '月度库存盘点' })
+const inventoryScanForm = ref({ checkId: null, traceCode: '' })
+const auditList = ref([])
 
 // --- 5. 图表逻辑 ---
 let pieChartInstance = null
@@ -192,6 +223,10 @@ api.interceptors.response.use(
 
 const roleText = (role) => roleLabels[role] || role || '--'
 const statusText = (status) => statusLabels[status] || status || '--'
+const newRequestId = (action) => {
+  const randomPart = crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  return `${action}-${randomPart}`
+}
 
 const handleUnauthorized = () => {
   localStorage.removeItem('hospitalDrugToken')
@@ -393,16 +428,18 @@ const refreshData = async () => {
   if (!authToken.value) return
   loading.value = true
   try {
-    const [resList, resRecords, resSummary, resStatus] = await Promise.all([
+    const [resList, resRecords, resSummary, resStatus, resAlerts] = await Promise.all([
       api.get('/list'),
       api.get('/records/recent?limit=50').catch(() => api.get('/records')),
       api.get('/dashboard/summary').catch(() => ({ data: {} })),
-      api.get('/stock/status').catch(() => ({ data: {} }))
+      api.get('/stock/status').catch(() => ({ data: {} })),
+      api.get('/alerts/enhanced').catch(() => ({ data: { lowStock: [], expired: [], availableSplitCodes: [], longIdleStock: [] } }))
     ])
     drugList.value = resList.data
     recordList.value = resRecords.data
     dashboardSummary.value = resSummary.data || {}
     stockStatus.value = resStatus.data || {}
+    enhancedAlerts.value = resAlerts.data || {}
     apiOnline.value = true
     lastSyncedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
     if(currentTab.value === 'dashboard') initCharts()
@@ -465,6 +502,7 @@ const dispenseByNurse = async () => {
 
   try {
     const res = await api.post('/dispense', {
+      requestId: newRequestId('dispense'),
       traceCode: code,
       patientId: bindInfo, 
       prescriptionId: prescription.id.toString(),
@@ -520,6 +558,7 @@ const returnByNurse = async (group) => {
       localFixMap.value.push({ drugName: p.drugName, correctName: returnLogName, timeStr: timeStr })
 
       return api.post('/return', {
+        requestId: newRequestId('return'),
         prescriptionId: p.id.toString(),
         traceCode: p.traceCodeDispensed,
         patientId: returnLogName, 
@@ -559,6 +598,7 @@ const directOutbound = async () => {
   loading.value = true
   try {
     await api.post('/dispense', {
+      requestId: newRequestId('qc'),
       traceCode: code,
       patientId: operatorNote,
       quantity: String(outboundQty.value || 1)
@@ -588,6 +628,7 @@ const createSplitCode = async () => {
   loading.value = true
   try {
     const res = await api.post('/split/create', {
+      requestId: newRequestId('split'),
       parentTraceCode,
       splitUnits: String(splitUnits)
     })
@@ -613,6 +654,7 @@ const quickAddDrug = async () => {
   try {
     // 1. 发送请求给后端
     const res = await api.post('/add', { 
+        requestId: newRequestId('inbound'),
         ...inboundForm.value, 
         batchNumber: batchWithUser, 
         quantity: 1 // 前端也主动锁定为1，配合后端的单品架构
@@ -640,6 +682,129 @@ const quickAddDrug = async () => {
     
   } catch (e) { 
     showNotification('网络或服务器内部错误', 'error') 
+  }
+}
+
+const resetCatalogForm = () => {
+  catalogForm.value = {
+    id: null,
+    drugName: '',
+    specification: '',
+    dosageForm: '',
+    manufacturer: '',
+    isSplitAllowed: false,
+    packageUnit: '盒',
+    minUnit: '盒',
+    minUnitsPerPackage: 1,
+    lowStockThreshold: 50,
+    status: 'ENABLED'
+  }
+}
+
+const loadCatalog = async () => {
+  if (!canUsePharmacy.value) return
+  const res = await api.get('/catalog')
+  catalogList.value = res.data
+}
+
+const editCatalog = (item) => {
+  catalogForm.value = { ...item }
+}
+
+const saveCatalog = async () => {
+  try {
+    if (catalogForm.value.id) {
+      await api.put(`/catalog/${catalogForm.value.id}`, catalogForm.value)
+      showNotification('药品档案已更新', 'success')
+    } else {
+      await api.post('/catalog', catalogForm.value)
+      showNotification('药品档案已创建', 'success')
+    }
+    resetCatalogForm()
+    await loadCatalog()
+  } catch (e) {
+    showNotification(e.response?.data || '药品档案保存失败', 'error')
+  }
+}
+
+const disableCatalog = async (item) => {
+  if (!confirm(`确认停用药品档案 ${item.drugName}？`)) return
+  try {
+    await api.delete(`/catalog/${item.id}`)
+    showNotification('药品档案已停用', 'success')
+    await loadCatalog()
+  } catch (e) {
+    showNotification(e.response?.data || '药品档案停用失败', 'error')
+  }
+}
+
+const loadInventory = async () => {
+  if (!canUsePharmacy.value) return
+  const res = await api.get('/inventory')
+  inventoryList.value = res.data
+}
+
+const createInventory = async () => {
+  try {
+    const res = await api.post('/inventory', inventoryForm.value)
+    showNotification('盘点单已创建', 'success')
+    await loadInventory()
+    const created = inventoryList.value.find(i => i.checkNo === res.data.checkNo)
+    inventoryScanForm.value.checkId = created?.id || inventoryList.value[0]?.id || null
+  } catch (e) {
+    showNotification(e.response?.data || '盘点单创建失败', 'error')
+  }
+}
+
+const loadInventoryItems = async (checkId) => {
+  if (!checkId) return
+  inventoryScanForm.value.checkId = checkId
+  const res = await api.get(`/inventory/${checkId}/items`)
+  inventoryItems.value = res.data
+}
+
+const scanInventory = async () => {
+  if (!inventoryScanForm.value.checkId) return showNotification('请先选择盘点单', 'error')
+  if (!inventoryScanForm.value.traceCode.trim()) return showNotification('请输入追溯码', 'error')
+  try {
+    await api.post(`/inventory/${inventoryScanForm.value.checkId}/scan`, { traceCode: inventoryScanForm.value.traceCode })
+    inventoryScanForm.value.traceCode = ''
+    await loadInventoryItems(inventoryScanForm.value.checkId)
+    showNotification('盘点扫描已记录', 'success')
+  } catch (e) {
+    showNotification(e.response?.data || '盘点扫描失败', 'error')
+  }
+}
+
+const completeInventory = async (checkId) => {
+  if (!confirm('确认完成该盘点单？完成后不能继续扫描。')) return
+  try {
+    await api.post(`/inventory/${checkId}/complete`)
+    showNotification('盘点单已完成', 'success')
+    await loadInventory()
+    if (inventoryScanForm.value.checkId === checkId) inventoryItems.value = []
+  } catch (e) {
+    showNotification(e.response?.data || '盘点完成失败', 'error')
+  }
+}
+
+const loadAudit = async () => {
+  if (!isAdmin.value) return
+  const res = await api.get('/audit/recent?limit=100')
+  auditList.value = res.data
+}
+
+const downloadReport = async (path) => {
+  try {
+    const res = await api.get(path, { responseType: 'blob' })
+    const url = URL.createObjectURL(res.data)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = path.split('/').pop() || 'report.csv'
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    showNotification('报表下载失败', 'error')
   }
 }
 onMounted(() => restoreSession())
@@ -676,27 +841,65 @@ onMounted(() => restoreSession())
       </div>
     </div>
 
-    <div v-else class="container">
-    <div class="header">
+    <div v-else class="qq-shell">
+      <aside class="qq-sidebar">
+        <div class="qq-app-mark" title="医院药品管理系统">医</div>
+        <div class="qq-profile-block">
+          <div class="qq-avatar">
+            {{ userInitial }}
+            <span class="qq-online-dot" title="当前在线"></span>
+          </div>
+          <strong>{{ currentUser }}</strong>
+          <span>在线 · {{ roleText(authUser.role) }}</span>
+          <small>{{ authUser.department || '未设置科室' }}</small>
+        </div>
+
+        <div class="qq-quick-actions" aria-label="快捷操作">
+          <button
+            :class="{ active: currentTab === 'dashboard' }"
+            title="返回院内总览"
+            @click="currentTab = 'dashboard'"
+          >首</button>
+          <button title="刷新当前数据" @click="refreshData">刷</button>
+          <button
+            v-if="canUseNurse"
+            :class="{ active: currentTab === 'nurse' }"
+            title="进入调剂发药"
+            @click="currentTab = 'nurse'"
+          >药</button>
+          <button
+            v-if="isAdmin"
+            :class="{ active: currentTab === 'users' }"
+            title="进入用户管理"
+            @click="currentTab = 'users'; loadUsers()"
+          >人</button>
+        </div>
+
+        <button @click="logout" class="qq-sidebar-logout" title="退出登录">退</button>
+      </aside>
+
+      <main class="container qq-main">
+    <div class="header qq-header">
       <div class="title-row">
         <div class="brand-block">
           <span class="brand-kicker">Hospital Pharmacy Console</span>
           <h1>医院药品闭环管理系统 <small>院内版 v4</small></h1>
         </div>
         <div class="top-actions">
-          <span :class="['connection-pill', { offline: !apiOnline }]">● {{ apiOnline ? '数据已连接' : '接口待连接' }}</span>
-          <div class="user-profile">
-            <span>{{ roleText(authUser.role) }}</span>
-            <strong>{{ currentUser }}</strong>
-            <small>{{ authUser.department || '未设置科室' }}</small>
+          <div class="current-module">
+            <span>当前工作台</span>
+            <strong>{{ activeModuleName }}</strong>
           </div>
-          <button @click="logout" class="btn-logout">退出</button>
+          <span :class="['connection-pill', { offline: !apiOnline }]">● {{ apiOnline ? '数据已连接' : '接口待连接' }}</span>
         </div>
       </div>
       <div class="tabs nav-rail">
         <button :class="{ active: currentTab === 'dashboard' }" @click="currentTab = 'dashboard'">院内总览</button>
         <button v-if="canUsePharmacy" :class="{ active: currentTab === 'pharmacy' }" @click="currentTab = 'pharmacy'">药库质控</button>
         <button v-if="canUseNurse" :class="{ active: currentTab === 'nurse' }" @click="currentTab = 'nurse'">调剂发药</button>
+        <button v-if="canUsePharmacy" :class="{ active: currentTab === 'catalog' }" @click="currentTab = 'catalog'; loadCatalog()">药品档案</button>
+        <button v-if="canUsePharmacy" :class="{ active: currentTab === 'inventory' }" @click="currentTab = 'inventory'; loadInventory()">库存盘点</button>
+        <button v-if="isAdmin" :class="{ active: currentTab === 'audit' }" @click="currentTab = 'audit'; loadAudit()">审计报表</button>
         <button v-if="isAdmin" :class="{ active: currentTab === 'users' }" @click="currentTab = 'users'; loadUsers()">用户管理</button>
       </div>
     </div>
@@ -726,6 +929,12 @@ onMounted(() => restoreSession())
         <div class="card stat-green"><h3>在库可调剂</h3><div class="num">{{ inStockCount }} <small>件</small></div><p>已出库 {{ outStockCount }} 件</p></div>
         <div class="card stat-amber"><h3>近效期预警</h3><div class="num">{{ nearExpiryCount }} <small>件</small></div><p>90 天内到期需复核</p></div>
         <div class="card stat-red"><h3>低库存预警</h3><div class="num">{{ lowStockCount }} <small>种</small></div><p>低于院内补货阈值</p></div>
+      </div>
+      <div class="command-strip">
+        <div class="command-item"><span>过期在库</span><strong>{{ enhancedAlerts.expired?.length || 0 }}</strong></div>
+        <div class="command-item"><span>拆零待发子码</span><strong>{{ enhancedAlerts.availableSplitCodes?.length || 0 }}</strong></div>
+        <div class="command-item"><span>长期未动销</span><strong>{{ enhancedAlerts.longIdleStock?.length || 0 }}</strong></div>
+        <div class="command-item"><span>按档案低库存</span><strong>{{ enhancedAlerts.lowStock?.length || 0 }}</strong></div>
       </div>
       <div class="charts-row">
         <div class="chart-box"><div id="stockPie" class="echart-container"></div></div>
@@ -904,6 +1113,159 @@ onMounted(() => restoreSession())
       </div>
     </div>
 
+    <div v-else-if="currentTab === 'catalog' && canUsePharmacy" class="work-layout">
+      <div class="user-admin-layout">
+        <div class="box in-box">
+          <div class="box-header">
+            <h3>{{ catalogForm.id ? '编辑药品档案' : '新增药品档案' }}</h3>
+            <button v-if="catalogForm.id" @click="resetCatalogForm" class="btn-subtle">新建</button>
+          </div>
+          <div class="form-grid">
+            <input v-model="catalogForm.drugName" placeholder="药品名称" />
+            <div class="row">
+              <input v-model="catalogForm.specification" placeholder="规格，如 0.5g*20片" />
+              <input v-model="catalogForm.dosageForm" placeholder="剂型，如片剂" />
+            </div>
+            <input v-model="catalogForm.manufacturer" placeholder="生产厂家" />
+            <label class="toggle split-toggle"><input type="checkbox" v-model="catalogForm.isSplitAllowed"><span>允许拆零</span></label>
+            <div class="row">
+              <input v-model="catalogForm.packageUnit" placeholder="整包装单位" />
+              <input v-model="catalogForm.minUnit" placeholder="最小单位" />
+              <input v-model="catalogForm.minUnitsPerPackage" type="number" min="1" placeholder="每包装最小单位数" />
+            </div>
+            <div class="row">
+              <input v-model="catalogForm.lowStockThreshold" type="number" min="1" placeholder="低库存阈值" />
+              <select v-model="catalogForm.status">
+                <option value="ENABLED">启用</option>
+                <option value="DISABLED">停用</option>
+              </select>
+            </div>
+            <button @click="saveCatalog" class="btn-primary">{{ catalogForm.id ? '保存档案' : '创建档案' }}</button>
+          </div>
+        </div>
+        <div class="table-card">
+          <h3>药品基础档案</h3>
+          <table>
+            <thead><tr><th>药品</th><th>规格</th><th>剂型</th><th>厂家</th><th>拆零</th><th>包装</th><th>低库存</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody>
+              <tr v-for="c in catalogList" :key="c.id">
+                <td>{{ c.drugName }}</td>
+                <td>{{ c.specification || '--' }}</td>
+                <td>{{ c.dosageForm || '--' }}</td>
+                <td>{{ c.manufacturer || '--' }}</td>
+                <td><span :class="c.isSplitAllowed ? 'tag-ok' : 'badge blue-info'">{{ c.isSplitAllowed ? '允许' : '整包装' }}</span></td>
+                <td>{{ c.packageUnit }} / {{ c.minUnitsPerPackage }}{{ c.minUnit }}</td>
+                <td>{{ c.lowStockThreshold }}</td>
+                <td><span :class="c.status === 'ENABLED' ? 'tag-ok' : 'tag-warn'">{{ c.status === 'ENABLED' ? '启用' : '停用' }}</span></td>
+                <td>
+                  <div class="user-actions">
+                    <button @click="editCatalog(c)" class="btn-mini">编辑</button>
+                    <button @click="disableCatalog(c)" class="btn-mini-danger">停用</button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div v-else-if="currentTab === 'inventory' && canUsePharmacy" class="work-layout">
+      <div class="action-panel">
+        <div class="box in-box">
+          <h3>创建盘点单</h3>
+          <div class="form-grid">
+            <input v-model="inventoryForm.title" placeholder="盘点标题" />
+            <button @click="createInventory" class="btn-primary">创建盘点</button>
+          </div>
+        </div>
+        <div class="box out-box">
+          <h3>扫描实物追溯码</h3>
+          <div class="form-grid">
+            <select v-model="inventoryScanForm.checkId" @change="loadInventoryItems(inventoryScanForm.checkId)">
+              <option :value="null">选择盘点单</option>
+              <option v-for="i in inventoryList" :key="i.id" :value="i.id">{{ i.checkNo }} · {{ i.title }} · {{ i.status }}</option>
+            </select>
+            <input v-model="inventoryScanForm.traceCode" placeholder="扫描母码或子码" @keyup.enter="scanInventory" class="scan-input" />
+            <button @click="scanInventory" class="btn-warning">记录扫描</button>
+          </div>
+        </div>
+      </div>
+      <div class="table-card">
+        <h3>盘点单</h3>
+        <table>
+          <thead><tr><th>单号</th><th>标题</th><th>状态</th><th>创建人</th><th>创建时间</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr v-for="i in inventoryList" :key="i.id">
+              <td class="mono">{{ i.checkNo }}</td>
+              <td>{{ i.title }}</td>
+              <td><span :class="i.status === 'OPEN' ? 'tag-ok' : 'badge blue-info'">{{ i.status }}</span></td>
+              <td>{{ i.createdBy || '--' }}</td>
+              <td class="time">{{ i.createTime || '--' }}</td>
+              <td>
+                <div class="user-actions">
+                  <button @click="loadInventoryItems(i.id)" class="btn-mini">查看明细</button>
+                  <button v-if="i.status === 'OPEN'" @click="completeInventory(i.id)" class="btn-mini-danger">完成</button>
+                  <button @click="downloadReport(`/reports/inventory/${i.id}.csv`)" class="btn-mini">导出</button>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="table-card">
+        <h3>盘点明细</h3>
+        <table>
+          <thead><tr><th>追溯码</th><th>码类型</th><th>药品</th><th>系统状态</th><th>实际状态</th><th>差异</th><th>扫描人</th><th>时间</th></tr></thead>
+          <tbody>
+            <tr v-for="item in inventoryItems" :key="item.id || item.traceCode">
+              <td class="mono">{{ item.traceCode }}</td>
+              <td>{{ item.codeType }}</td>
+              <td>{{ item.drugName || '--' }}</td>
+              <td>{{ item.expectedStatus || '--' }}</td>
+              <td>{{ item.actualStatus }}</td>
+              <td><span :class="item.differenceType === 'MATCH' ? 'tag-ok' : 'tag-warn'">{{ item.differenceType }}</span></td>
+              <td>{{ item.scannedBy || '--' }}</td>
+              <td class="time">{{ item.scanTime || '--' }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div v-else-if="currentTab === 'audit' && isAdmin" class="work-layout">
+      <div class="action-panel">
+        <div class="box in-box">
+          <h3>报表导出</h3>
+          <div class="form-grid">
+            <button @click="downloadReport('/reports/dispense.csv')" class="btn-primary">导出出入库流水 CSV</button>
+            <button @click="downloadReport('/reports/audit.csv')" class="btn-warning">导出审计日志 CSV</button>
+          </div>
+        </div>
+        <div class="box out-box">
+          <h3>审计概况</h3>
+          <div class="command-item"><span>最近审计记录</span><strong>{{ auditList.length }}</strong></div>
+        </div>
+      </div>
+      <div class="table-card">
+        <h3>操作审计日志</h3>
+        <table>
+          <thead><tr><th>时间</th><th>操作人</th><th>角色</th><th>动作</th><th>对象</th><th>结果</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr v-for="a in auditList" :key="a.id">
+              <td class="time">{{ a.createTime || '--' }}</td>
+              <td>{{ a.operatorName || '--' }}</td>
+              <td>{{ roleText(a.operatorRole) }}</td>
+              <td class="mono">{{ a.action }}</td>
+              <td>{{ a.targetType || '--' }} / {{ a.targetId || '--' }}</td>
+              <td><span :class="a.result === 'SUCCESS' ? 'tag-ok' : 'tag-warn'">{{ a.result }}</span></td>
+              <td>{{ a.message || '--' }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <div v-else-if="currentTab === 'users' && isAdmin" class="work-layout">
       <div class="user-admin-layout">
         <div class="box in-box">
@@ -980,6 +1342,7 @@ onMounted(() => restoreSession())
         </div>
       </div>
     </div>
+    </main>
     </div>
   </div>
 </template>
@@ -2181,6 +2544,512 @@ tbody tr:hover {
   }
 
   .mini-password {
+    width: 100%;
+  }
+}
+
+/* QQ-style hospital workstation shell */
+:global(:root) {
+  --qq-blue: #1683ff;
+  --qq-blue-deep: #0968d8;
+  --qq-blue-soft: #eaf4ff;
+  --qq-cyan: #12a8bd;
+  --qq-green: #18a66a;
+  --qq-page: #eef3f8;
+  --qq-line: #dbe5ef;
+}
+
+:global(body) {
+  background: var(--qq-page);
+}
+
+.qq-shell {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  min-height: 100vh;
+  background: var(--qq-page);
+}
+
+.qq-sidebar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  height: 100vh;
+  padding: 18px 10px 14px;
+  background: linear-gradient(180deg, #2495ff 0%, #0875e5 58%, #075dbb 100%);
+  color: #fff;
+  box-shadow: 8px 0 24px rgba(21, 91, 160, 0.16);
+}
+
+.qq-app-mark {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  font-size: 20px;
+  font-weight: 850;
+}
+
+.qq-profile-block {
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  width: 100%;
+  margin-top: 28px;
+  text-align: center;
+}
+
+.qq-avatar {
+  position: relative;
+  display: grid;
+  width: 56px;
+  height: 56px;
+  place-items: center;
+  border: 3px solid rgba(255, 255, 255, 0.9);
+  border-radius: 50%;
+  background: #f5fbff;
+  color: var(--qq-blue-deep);
+  box-shadow: 0 8px 22px rgba(0, 52, 112, 0.24);
+  font-size: 24px;
+  font-weight: 850;
+}
+
+.qq-online-dot {
+  position: absolute;
+  right: -1px;
+  bottom: 2px;
+  width: 14px;
+  height: 14px;
+  border: 3px solid #fff;
+  border-radius: 50%;
+  background: #20c875;
+}
+
+.qq-profile-block strong {
+  overflow: hidden;
+  width: 100%;
+  margin-top: 12px;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qq-profile-block span,
+.qq-profile-block small {
+  overflow: hidden;
+  width: 100%;
+  margin-top: 5px;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 10px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qq-quick-actions {
+  display: grid;
+  gap: 10px;
+  margin-top: 34px;
+}
+
+.qq-quick-actions button,
+.qq-sidebar-logout {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.84);
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: 0.18s ease;
+}
+
+.qq-quick-actions button:hover,
+.qq-quick-actions button.active,
+.qq-sidebar-logout:hover {
+  border-color: rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+}
+
+.qq-sidebar-logout {
+  margin-top: auto;
+}
+
+.container.qq-main {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 20px 24px 38px;
+}
+
+.qq-header {
+  top: 12px;
+  margin-bottom: 18px;
+  padding: 18px 20px 14px;
+  border: 1px solid rgba(219, 229, 239, 0.9);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 8px 28px rgba(42, 78, 112, 0.09);
+}
+
+.qq-header .title-row {
+  margin-bottom: 15px;
+}
+
+.qq-header .brand-kicker {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--qq-blue);
+}
+
+.qq-header .title-row h1 {
+  font-size: 24px;
+}
+
+.current-module {
+  display: grid;
+  gap: 3px;
+  min-width: 126px;
+  padding-right: 14px;
+  border-right: 1px solid var(--qq-line);
+  text-align: right;
+}
+
+.current-module span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.current-module strong {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.qq-header .nav-rail {
+  display: flex;
+  width: 100%;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 5px;
+  border-color: #e4ebf2;
+  background: #f5f8fb;
+  box-shadow: none;
+}
+
+.qq-header .nav-rail::after {
+  display: none;
+}
+
+.qq-header .tabs button {
+  min-height: 36px;
+  padding: 0 18px;
+  border-radius: 999px;
+  color: #506177;
+  font-size: 13px;
+}
+
+.qq-header .tabs button:hover {
+  background: #fff;
+  color: var(--qq-blue-deep);
+}
+
+.qq-header .tabs button.active {
+  background: var(--qq-blue);
+  box-shadow: 0 5px 14px rgba(22, 131, 255, 0.24);
+  color: #fff;
+}
+
+.qq-main > .command-strip {
+  margin-top: 0;
+}
+
+.command-item,
+.card,
+.chart-box,
+.table-card,
+.box,
+.left-col,
+.right-col,
+.expiry-alert-box,
+.recent-card {
+  border-color: var(--qq-line);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 5px 18px rgba(42, 78, 112, 0.07);
+}
+
+.command-item {
+  min-height: 70px;
+  border-left: 3px solid var(--qq-cyan);
+}
+
+.stat-cards {
+  gap: 12px;
+}
+
+.stat-cards .card {
+  min-height: 132px;
+  background: #fff;
+}
+
+.stat-cards .card::before {
+  width: 5px;
+  border-radius: 0 4px 4px 0;
+}
+
+.table-card h3,
+.box h3,
+.right-col h3,
+.recent-card h3,
+.expiry-alert-box h3 {
+  color: #26384c;
+  font-size: 15px;
+}
+
+input,
+select,
+textarea {
+  border-color: #d5e1ec;
+  border-radius: 6px;
+  background: #fbfdff;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--qq-blue);
+  box-shadow: 0 0 0 3px rgba(22, 131, 255, 0.11);
+}
+
+table thead th {
+  background: #f3f7fb;
+  color: #53657a;
+}
+
+table tbody tr:hover {
+  background: #f4f9ff;
+}
+
+.compact-log,
+.log-item {
+  border-color: #e5edf5;
+  background: #f8fbfe;
+}
+
+.log-item::before,
+.compact-log::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--qq-green);
+  box-shadow: 0 0 0 3px rgba(24, 166, 106, 0.12);
+}
+
+.login-shell {
+  background: #edf4fb;
+}
+
+.login-panel {
+  border-color: #d6e4f0;
+  border-radius: 8px;
+  box-shadow: 0 24px 60px rgba(27, 79, 128, 0.16);
+}
+
+.login-brand {
+  background: linear-gradient(145deg, rgba(22, 131, 255, 0.12), rgba(18, 168, 189, 0.12)), #f8fbff;
+}
+
+@media (max-width: 980px) {
+  .qq-shell {
+    grid-template-columns: 88px minmax(0, 1fr);
+  }
+
+  .qq-profile-block strong,
+  .qq-profile-block span,
+  .qq-profile-block small {
+    max-width: 70px;
+  }
+
+  .container.qq-main {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .qq-header .title-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .qq-header .top-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+
+@media (max-width: 760px) {
+  .qq-shell {
+    display: block;
+  }
+
+  .qq-sidebar {
+    position: static;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    gap: 12px;
+    width: 100%;
+    height: auto;
+    padding: 10px 14px;
+    background: linear-gradient(90deg, #1683ff, #0872df);
+  }
+
+  .qq-app-mark {
+    width: 36px;
+    height: 36px;
+  }
+
+  .qq-profile-block {
+    display: grid;
+    grid-template-columns: 38px minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    column-gap: 9px;
+    margin: 0;
+    text-align: left;
+  }
+
+  .qq-avatar {
+    grid-row: 1 / 3;
+    width: 38px;
+    height: 38px;
+    border-width: 2px;
+    font-size: 16px;
+  }
+
+  .qq-online-dot {
+    width: 11px;
+    height: 11px;
+    border-width: 2px;
+  }
+
+  .qq-profile-block strong,
+  .qq-profile-block span {
+    width: auto;
+    max-width: none;
+    margin: 0;
+  }
+
+  .qq-profile-block small {
+    display: none;
+  }
+
+  .qq-quick-actions {
+    display: flex;
+    gap: 4px;
+    margin: 0;
+  }
+
+  .qq-quick-actions button,
+  .qq-sidebar-logout {
+    width: 34px;
+    height: 34px;
+  }
+
+  .qq-sidebar-logout {
+    margin: 0;
+  }
+
+  .container.qq-main {
+    width: 100%;
+    padding: 10px 10px 28px;
+  }
+
+  .qq-header {
+    padding: 14px 12px 12px;
+  }
+
+  .qq-header .title-row h1 {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 20px;
+  }
+
+  .qq-header .top-actions {
+    flex-direction: row;
+  }
+
+  .current-module {
+    min-width: 0;
+    text-align: left;
+  }
+
+  .qq-header .connection-pill {
+    width: auto;
+    min-height: 38px;
+  }
+
+  .qq-header .nav-rail {
+    display: flex;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    padding-bottom: 7px;
+  }
+
+  .qq-header .tabs button {
+    width: auto;
+    flex: 0 0 auto;
+    padding: 0 15px;
+  }
+
+  .command-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .command-item {
+    min-height: 68px;
+  }
+}
+
+@media (max-width: 480px) {
+  .qq-sidebar {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .qq-app-mark {
+    display: none;
+  }
+
+  .qq-quick-actions button:nth-child(n + 3) {
+    display: none;
+  }
+
+  .qq-header .top-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .current-module {
+    padding: 0 0 8px;
+    border-right: 0;
+    border-bottom: 1px solid var(--qq-line);
+  }
+
+  .qq-header .connection-pill {
     width: 100%;
   }
 }

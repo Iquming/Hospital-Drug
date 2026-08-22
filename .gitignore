@@ -2,6 +2,12 @@
 target/
 *.class
 
+# Local device demo and Android build cache
+backend/android-mediapipe-demo/
+**/.gradle/
+**/build/
+**/local.properties
+
 # Node / Vue
 node_modules/
 dist/

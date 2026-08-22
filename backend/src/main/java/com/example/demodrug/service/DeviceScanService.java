@@ -1,6 +1,8 @@
 package com.example.demodrug.service;
 
 import com.example.demodrug.dao.DrugDao;
+import com.example.demodrug.constant.SplitCodeStatus;
+import com.example.demodrug.constant.StockStatus;
 import com.example.demodrug.entity.DrugSplitCode;
 import com.example.demodrug.entity.DrugStock;
 import org.springframework.stereotype.Service;
@@ -54,7 +56,7 @@ public class DeviceScanService {
         if (drug == null) {
             return response(false, scene, traceCode, null, "无效追溯码，系统中无此实物档案", "BLOCK");
         }
-        if (safeQuantity(drug) <= 0) {
+        if (!StockStatus.IN_STOCK.equals(safeText(drug.getStatus(), StockStatus.IN_STOCK)) || safeQuantity(drug) <= 0) {
             return decorate(response(true, scene, traceCode, drug, "该单品已出库或库存状态异常", "BLOCK"), drug, null);
         }
         if (StringUtils.hasText(expectedDrugName) && !expectedDrugName.equals(drug.getDrugName())) {
@@ -65,7 +67,7 @@ public class DeviceScanService {
 
     private Map<String, Object> verifyReturn(String scene, String traceCode, DrugStock drug, DrugSplitCode splitCode) {
         if (splitCode != null) {
-            if (!"DISPENSED".equals(splitCode.getStatus())) {
+            if (!SplitCodeStatus.DISPENSED.equals(splitCode.getStatus())) {
                 return decorate(response(true, scene, traceCode, drug, "拆零子码未发药或已处理，不能退药", "BLOCK"), drug, splitCode);
             }
             return decorate(response(true, scene, traceCode, drug, "拆零子码核对通过，可执行退药", "ALLOW"), drug, splitCode);
@@ -73,7 +75,7 @@ public class DeviceScanService {
         if (drug == null) {
             return response(false, scene, traceCode, null, "无效追溯码，系统中无此实物档案", "BLOCK");
         }
-        if (safeQuantity(drug) != 0) {
+        if (!StockStatus.DISPENSED.equals(safeText(drug.getStatus(), ""))) {
             return decorate(response(true, scene, traceCode, drug, "该单品未出库，不符合退药条件", "BLOCK"), drug, null);
         }
         return decorate(response(true, scene, traceCode, drug, "核对通过，可执行退药", "ALLOW"), drug, null);
@@ -89,7 +91,7 @@ public class DeviceScanService {
     }
 
     private Map<String, Object> verifySplitDispense(String scene, String traceCode, String expectedDrugName, DrugStock parent, DrugSplitCode splitCode) {
-        if (!"AVAILABLE".equals(splitCode.getStatus())) {
+        if (!SplitCodeStatus.AVAILABLE.equals(splitCode.getStatus())) {
             return decorate(response(true, scene, traceCode, parent, "拆零子码状态不是可发药", "BLOCK"), parent, splitCode);
         }
         if (StringUtils.hasText(expectedDrugName) && !expectedDrugName.equals(splitCode.getDrugName())) {
@@ -140,6 +142,8 @@ public class DeviceScanService {
         Map<String, Object> status = new HashMap<>();
         Integer daysLeft = daysLeft(drug.getExpireDate());
         status.put("quantity", safeQuantity(drug));
+        status.put("stockStatus", drug.getStatus());
+        status.put("version", drug.getVersion());
         status.put("expired", daysLeft != null && daysLeft < 0);
         status.put("nearExpiry", daysLeft != null && daysLeft >= 0 && daysLeft <= 90);
         status.put("daysLeft", daysLeft);

@@ -19,6 +19,9 @@ public class DrugStock {
     private Integer remainingMinUnits;
     private String parentTraceCode;
     private String stockType;
+    private String status;
+    private Long version;
+    private String requestId;
 
     // ✅ 改动：将类型从 Date 改为 String，方便前端直接传 "2028-01-01" 格式
     // 原来如果是 Date 类型，前端传来的字符串需要额外转换，改为 String 更简单
@@ -75,6 +78,15 @@ public class DrugStock {
 
     public String getStockType() { return stockType; }
     public void setStockType(String stockType) { this.stockType = stockType; }
+
+    public String getStatus() { return status; }
+    public void setStatus(String status) { this.status = status; }
+
+    public Long getVersion() { return version; }
+    public void setVersion(Long version) { this.version = version; }
+
+    public String getRequestId() { return requestId; }
+    public void setRequestId(String requestId) { this.requestId = requestId; }
 
     // ✅ expireDate 使用 String 类型，直接与数据库 DATETIME 字段映射
     public String getExpireDate() { return expireDate; }

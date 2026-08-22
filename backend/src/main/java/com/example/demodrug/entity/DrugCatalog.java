@@ -6,22 +6,18 @@ import lombok.Data;
 import java.time.LocalDateTime;
 
 @Data
-public class DrugSplitCode {
+public class DrugCatalog {
     private Long id;
-    private String parentTraceCode;
-    private String childTraceCode;
     private String drugName;
-    private String batchNumber;
+    private String specification;
+    private String dosageForm;
+    private String manufacturer;
+    private Boolean isSplitAllowed;
+    private String packageUnit;
     private String minUnit;
-    private Integer splitUnits;
-    private Integer remainingUnits;
+    private Integer minUnitsPerPackage;
+    private Integer lowStockThreshold;
     private String status;
-    private Long version;
-    private String createdBy;
-    private String dispensedToPatientId;
-
-    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss", timezone = "GMT+8")
-    private LocalDateTime dispensedTime;
 
     @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss", timezone = "GMT+8")
     private LocalDateTime createTime;

@@ -1,8 +1,11 @@
 package com.example.demodrug.service;
 
 import com.example.demodrug.dao.DrugDao;
+import com.example.demodrug.constant.SplitCodeStatus;
 import com.example.demodrug.entity.DrugSplitCode;
 import com.example.demodrug.entity.DrugStock;
+import com.example.demodrug.exception.BusinessException;
+import com.example.demodrug.exception.ErrorCode;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -18,6 +21,9 @@ public class DrugSplitService {
 
     @Resource
     private DrugDao drugDao;
+
+    @Resource
+    private AuditLogService auditLogService;
 
     @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> createSplitCode(String parentTraceCode, Integer splitUnits, String operatorLabel) {
@@ -40,7 +46,8 @@ public class DrugSplitService {
         String childCode = generateChildCode(parentCode);
         int reserved = drugDao.reserveParentMinUnits(parentCode, units);
         if (reserved <= 0) {
-            throw new IllegalStateException("母包装库存已变化，请刷新后重试");
+            auditLogService.record("SPLIT_PARENT_CONFLICT", "drug_stock", parentCode, null, String.valueOf(units), "FAILED", "拆零母包装并发冲突或状态不允许");
+            throw new BusinessException(ErrorCode.STOCK_CONFLICT, "母包装库存已变化、被锁定或剩余最小单位不足，请刷新后重试");
         }
 
         DrugSplitCode splitCode = new DrugSplitCode();
@@ -53,6 +60,8 @@ public class DrugSplitService {
         splitCode.setRemainingUnits(units);
         splitCode.setCreatedBy(operator);
         drugDao.saveSplitCode(splitCode);
+        auditLogService.record("SPLIT_CREATE", "drug_split_code", childCode, parentCode,
+                units + splitCode.getMinUnit(), "SUCCESS", "拆零建码");
 
         Map<String, Object> result = new HashMap<>();
         result.put("childTraceCode", childCode);
@@ -61,7 +70,26 @@ public class DrugSplitService {
         result.put("remainingParentUnits", remaining - units);
         result.put("minUnit", splitCode.getMinUnit());
         result.put("drugName", parent.getDrugName());
-        result.put("status", "AVAILABLE");
+        result.put("status", SplitCodeStatus.AVAILABLE);
+        return result;
+    }
+
+    public Map<String, Object> label(String childTraceCode) {
+        String code = requireText(childTraceCode, "子码不能为空");
+        DrugSplitCode splitCode = drugDao.getSplitByChildTraceCode(code);
+        if (splitCode == null) {
+            throw new IllegalArgumentException("拆零子码不存在");
+        }
+        Map<String, Object> result = new HashMap<>();
+        result.put("printType", "SPLIT_LABEL");
+        result.put("childTraceCode", splitCode.getChildTraceCode());
+        result.put("parentTraceCode", splitCode.getParentTraceCode());
+        result.put("drugName", splitCode.getDrugName());
+        result.put("batchNumber", splitCode.getBatchNumber());
+        result.put("minUnit", splitCode.getMinUnit());
+        result.put("splitUnits", splitCode.getSplitUnits());
+        result.put("status", splitCode.getStatus());
+        result.put("labelText", splitCode.getDrugName() + " " + splitCode.getSplitUnits() + splitCode.getMinUnit() + " 子码:" + splitCode.getChildTraceCode());
         return result;
     }
 

@@ -24,6 +24,9 @@ public class AuthService {
     @Resource
     private TokenService tokenService;
 
+    @Resource
+    private AuditLogService auditLogService;
+
     public Map<String, Object> login(String username, String password) {
         String normalizedUsername = requireText(username, "用户名不能为空");
         String normalizedPassword = requireText(password, "密码不能为空");
@@ -38,6 +41,8 @@ public class AuthService {
 
         sysUserDao.updateLastLogin(user.getId());
         CurrentUser currentUser = toCurrentUser(user);
+        auditLogService.recordUser(user.getId(), user.getDisplayName(), user.getRole(), "LOGIN",
+                "sys_user", String.valueOf(user.getId()), null, null, "SUCCESS", "用户登录");
         Map<String, Object> result = new HashMap<>();
         result.put("token", tokenService.generate(currentUser));
         result.put("user", currentUser);

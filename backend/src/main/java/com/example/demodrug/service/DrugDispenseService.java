@@ -1,8 +1,16 @@
 package com.example.demodrug.service;
 
 import com.example.demodrug.dao.DrugDao;
+import com.example.demodrug.constant.DispenseOperation;
+import com.example.demodrug.constant.DispenseType;
+import com.example.demodrug.constant.PrescriptionStatus;
+import com.example.demodrug.constant.SplitCodeStatus;
+import com.example.demodrug.constant.StockStatus;
 import com.example.demodrug.entity.DrugSplitCode;
 import com.example.demodrug.entity.DrugStock;
+import com.example.demodrug.entity.Prescription;
+import com.example.demodrug.exception.BusinessException;
+import com.example.demodrug.exception.ErrorCode;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -16,6 +24,9 @@ public class DrugDispenseService {
 
     @Resource
     private DrugDao drugDao;
+
+    @Resource
+    private AuditLogService auditLogService;
 
     @Transactional(rollbackFor = Exception.class)
     public void executeDispense(String traceCode, String patientId, String prescriptionIdStr, String operatorLabel) {
@@ -35,22 +46,29 @@ public class DrugDispenseService {
             throw new IllegalArgumentException("无效追溯码，系统中无此实物档案");
         }
 
+        String dispenseUnit = safeText(drug.getPackageUnit(), "盒");
+        if (prescriptionId != null) {
+            validatePrescription(prescriptionId, drug.getDrugName(), 1, dispenseUnit, normalizedPatientId);
+        }
+
         int rows = drugDao.dispenseDrug(normalizedTraceCode);
         if (rows <= 0) {
-            throw new IllegalStateException("该单品已被核销或库存状态异常");
+            auditLogService.record("DRUG_DISPENSE_CONFLICT", "drug_stock", normalizedTraceCode, null, StockStatus.DISPENSED, "FAILED", "整包装发药并发冲突或状态不允许");
+            throw new BusinessException(ErrorCode.STOCK_CONFLICT, "该单品已被核销、锁定或库存状态异常");
         }
 
-        String operationType = prescriptionId != null ? "处方扫码发药" : "药房质控出库";
+        String operationType = prescriptionId != null ? DispenseOperation.PRESCRIPTION_DISPENSE : DispenseOperation.PHARMACY_OUTBOUND;
 
         drugDao.saveRecord(normalizedTraceCode, drug.getDrugName(), operationType, normalizedPatientId + " 操作人:" + operator,
-                normalizedTraceCode, null, 1, safeText(drug.getPackageUnit(), "盒"), "WHOLE_PACKAGE");
+                normalizedTraceCode, null, 1, dispenseUnit, DispenseType.WHOLE_PACKAGE);
 
         if (prescriptionId != null) {
-            int updated = drugDao.completePrescription(prescriptionId, normalizedTraceCode, 1, safeText(drug.getPackageUnit(), "盒"));
+            int updated = drugDao.completePrescription(prescriptionId, normalizedTraceCode, 1, dispenseUnit);
             if (updated <= 0) {
-                throw new IllegalStateException("处方不存在或状态不是待发药");
+                throw new IllegalStateException("处方不存在或状态不是" + PrescriptionStatus.PENDING);
             }
         }
+        auditLogService.record("DRUG_DISPENSE", "drug_stock", normalizedTraceCode, StockStatus.IN_STOCK, "OUT_STOCK", "SUCCESS", operationType);
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -69,31 +87,37 @@ public class DrugDispenseService {
 
         int restored = drugDao.restoreReturnedDrug(normalizedTraceCode);
         if (restored <= 0) {
-            throw new IllegalStateException("退药失败：该单品未出库或库存状态异常");
+            auditLogService.record("DRUG_RETURN_CONFLICT", "drug_stock", normalizedTraceCode, null, StockStatus.IN_STOCK, "FAILED", "整包装退药状态不允许");
+            throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "退药失败：该单品未出库、被锁定或库存状态异常");
         }
 
         int prescriptionUpdated = drugDao.markPrescriptionReturned(prescriptionId);
         if (prescriptionUpdated <= 0) {
-            throw new IllegalStateException("退药失败：处方不存在或状态不是已发药");
+            throw new IllegalStateException("退药失败：处方不存在或状态不是" + PrescriptionStatus.DISPENSED);
         }
 
-        drugDao.saveRecord(normalizedTraceCode, normalizedDrugName, "【退药】患者退回", normalizedPatientId + " 操作人:" + operator,
-                normalizedTraceCode, null, 1, "盒", "WHOLE_PACKAGE");
+        drugDao.saveRecord(normalizedTraceCode, normalizedDrugName, DispenseOperation.RETURNED_BY_PATIENT, normalizedPatientId + " 操作人:" + operator,
+                normalizedTraceCode, null, 1, "盒", DispenseType.WHOLE_PACKAGE);
+        auditLogService.record("DRUG_RETURN", "drug_stock", normalizedTraceCode, "OUT_STOCK", StockStatus.IN_STOCK, "SUCCESS", "整包装退药");
     }
 
     private void executeSplitDispense(DrugSplitCode splitCode, String patientId, Long prescriptionId, String operator) {
-        if (!"AVAILABLE".equals(splitCode.getStatus())) {
+        if (!SplitCodeStatus.AVAILABLE.equals(splitCode.getStatus())) {
             throw new IllegalStateException("拆零子码状态不是可发药");
+        }
+        if (prescriptionId != null) {
+            validatePrescription(prescriptionId, splitCode.getDrugName(), splitCode.getSplitUnits(), splitCode.getMinUnit(), patientId);
         }
         int updated = drugDao.markSplitDispensed(splitCode.getChildTraceCode(), patientId);
         if (updated <= 0) {
-            throw new IllegalStateException("拆零子码已被处理，请刷新后重试");
+            auditLogService.record("SPLIT_DISPENSE_CONFLICT", "drug_split_code", splitCode.getChildTraceCode(), splitCode.getStatus(), SplitCodeStatus.DISPENSED, "FAILED", "拆零子码重复发药或状态变化");
+            throw new BusinessException(ErrorCode.STOCK_CONFLICT, "拆零子码已被处理，请刷新后重试");
         }
 
-        drugDao.saveRecord(splitCode.getChildTraceCode(), splitCode.getDrugName(), "拆零扫码发药",
+        drugDao.saveRecord(splitCode.getChildTraceCode(), splitCode.getDrugName(), DispenseOperation.SPLIT_DISPENSE,
                 patientId + " 操作人:" + operator,
                 splitCode.getParentTraceCode(), splitCode.getChildTraceCode(),
-                splitCode.getSplitUnits(), splitCode.getMinUnit(), "SPLIT_PACKAGE");
+                splitCode.getSplitUnits(), splitCode.getMinUnit(), DispenseType.SPLIT_PACKAGE);
 
         if (prescriptionId != null) {
             int prescriptionUpdated = drugDao.completePrescription(
@@ -103,30 +127,63 @@ public class DrugDispenseService {
                     splitCode.getMinUnit()
             );
             if (prescriptionUpdated <= 0) {
-                throw new IllegalStateException("处方不存在或状态不是待发药");
+                throw new IllegalStateException("处方不存在或状态不是" + PrescriptionStatus.PENDING);
             }
         }
+        auditLogService.record("SPLIT_DISPENSE", "drug_split_code", splitCode.getChildTraceCode(),
+                SplitCodeStatus.AVAILABLE, SplitCodeStatus.DISPENSED, "SUCCESS", DispenseOperation.SPLIT_DISPENSE);
     }
 
     private void executeSplitReturn(DrugSplitCode splitCode, Long prescriptionId, String patientId, String operator) {
-        if (!"DISPENSED".equals(splitCode.getStatus())) {
+        if (!SplitCodeStatus.DISPENSED.equals(splitCode.getStatus())) {
             throw new IllegalStateException("拆零子码未发药或已处理，不能退药");
         }
         int returned = drugDao.markSplitReturned(splitCode.getChildTraceCode());
         if (returned <= 0) {
-            throw new IllegalStateException("拆零退药失败：子码状态已变化");
+            auditLogService.record("SPLIT_RETURN_CONFLICT", "drug_split_code", splitCode.getChildTraceCode(), splitCode.getStatus(), SplitCodeStatus.RETURNED, "FAILED", "拆零子码重复退药或状态变化");
+            throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "拆零退药失败：子码状态已变化");
         }
         drugDao.restoreParentMinUnits(splitCode.getParentTraceCode(), splitCode.getSplitUnits());
 
         int prescriptionUpdated = drugDao.markPrescriptionReturned(prescriptionId);
         if (prescriptionUpdated <= 0) {
-            throw new IllegalStateException("退药失败：处方不存在或状态不是已发药");
+            throw new IllegalStateException("退药失败：处方不存在或状态不是" + PrescriptionStatus.DISPENSED);
         }
 
-        drugDao.saveRecord(splitCode.getChildTraceCode(), splitCode.getDrugName(), "【拆零退药】患者退回",
+        drugDao.saveRecord(splitCode.getChildTraceCode(), splitCode.getDrugName(), DispenseOperation.SPLIT_RETURNED_BY_PATIENT,
                 patientId + " 操作人:" + operator,
                 splitCode.getParentTraceCode(), splitCode.getChildTraceCode(),
-                splitCode.getSplitUnits(), splitCode.getMinUnit(), "SPLIT_PACKAGE");
+                splitCode.getSplitUnits(), splitCode.getMinUnit(), DispenseType.SPLIT_PACKAGE);
+        auditLogService.record("SPLIT_RETURN", "drug_split_code", splitCode.getChildTraceCode(),
+                SplitCodeStatus.DISPENSED, SplitCodeStatus.RETURNED, "SUCCESS", "拆零退药");
+    }
+
+    private void validatePrescription(Long prescriptionId, String drugName, Integer dispenseUnits, String dispenseUnit, String patientId) {
+        Prescription prescription = drugDao.findPrescriptionById(prescriptionId);
+        if (prescription == null) {
+            throw new IllegalArgumentException("处方不存在");
+        }
+        if (!PrescriptionStatus.PENDING.equals(prescription.getStatus())) {
+            throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "处方状态不是" + PrescriptionStatus.PENDING);
+        }
+        if (StringUtils.hasText(patientId) && StringUtils.hasText(prescription.getPatientId())
+                && !patientId.trim().equals(prescription.getPatientId().trim())
+                && !patientId.contains(prescription.getPatientId().trim())) {
+            throw new BusinessException(ErrorCode.PRESCRIPTION_MISMATCH, "患者编号与处方不一致");
+        }
+        if (StringUtils.hasText(prescription.getDrugName()) && !prescription.getDrugName().trim().equals(drugName)) {
+            throw new BusinessException(ErrorCode.PRESCRIPTION_MISMATCH, "药品名称与处方不一致");
+        }
+        if (prescription.getPrescribedUnits() != null && prescription.getPrescribedUnits() > 0
+                && !prescription.getPrescribedUnits().equals(dispenseUnits)) {
+            throw new BusinessException(ErrorCode.PRESCRIPTION_MISMATCH, "发放数量与处方数量不一致，应发 "
+                    + prescription.getPrescribedUnits() + safeText(prescription.getDispenseUnit(), dispenseUnit));
+        }
+        if (StringUtils.hasText(prescription.getDispenseUnit())
+                && StringUtils.hasText(dispenseUnit)
+                && !prescription.getDispenseUnit().trim().equals(dispenseUnit.trim())) {
+            throw new BusinessException(ErrorCode.PRESCRIPTION_MISMATCH, "发放单位与处方单位不一致");
+        }
     }
 
     private Long parsePrescriptionId(String prescriptionIdStr) {
