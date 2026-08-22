@@ -2,6 +2,23 @@
 import { ref, onMounted, nextTick, computed, watch } from 'vue'
 import axios from 'axios'
 import * as echarts from 'echarts' 
+import {
+  Activity,
+  BookOpen,
+  Boxes,
+  ChartNoAxesCombined,
+  CircleAlert,
+  CircleCheck,
+  ClipboardCheck,
+  LayoutDashboard,
+  LogOut,
+  PackageCheck,
+  Pill,
+  RefreshCw,
+  ScanLine,
+  ShieldCheck,
+  Users
+} from 'lucide-vue-next'
 import loginPharmacyHero from './assets/login-pharmacy-hero.png'
 
 // --- 0. 基础配置 ---
@@ -843,7 +860,7 @@ onMounted(() => restoreSession())
 
     <div v-else class="qq-shell">
       <aside class="qq-sidebar">
-        <div class="qq-app-mark" title="医院药品管理系统">医</div>
+        <div class="qq-app-mark" title="医院药品管理系统"><Pill :size="21" /></div>
         <div class="qq-profile-block">
           <div class="qq-avatar">
             {{ userInitial }}
@@ -859,23 +876,23 @@ onMounted(() => restoreSession())
             :class="{ active: currentTab === 'dashboard' }"
             title="返回院内总览"
             @click="currentTab = 'dashboard'"
-          >首</button>
-          <button title="刷新当前数据" @click="refreshData">刷</button>
+          ><LayoutDashboard :size="19" /></button>
+          <button title="刷新当前数据" @click="refreshData"><RefreshCw :size="19" /></button>
           <button
             v-if="canUseNurse"
             :class="{ active: currentTab === 'nurse' }"
             title="进入调剂发药"
             @click="currentTab = 'nurse'"
-          >药</button>
+          ><PackageCheck :size="19" /></button>
           <button
             v-if="isAdmin"
             :class="{ active: currentTab === 'users' }"
             title="进入用户管理"
             @click="currentTab = 'users'; loadUsers()"
-          >人</button>
+          ><Users :size="19" /></button>
         </div>
 
-        <button @click="logout" class="qq-sidebar-logout" title="退出登录">退</button>
+        <button @click="logout" class="qq-sidebar-logout" title="退出登录"><LogOut :size="19" /></button>
       </aside>
 
       <main class="container qq-main">
@@ -890,17 +907,19 @@ onMounted(() => restoreSession())
             <span>当前工作台</span>
             <strong>{{ activeModuleName }}</strong>
           </div>
-          <span :class="['connection-pill', { offline: !apiOnline }]">● {{ apiOnline ? '数据已连接' : '接口待连接' }}</span>
+          <span :class="['connection-pill', { offline: !apiOnline }]">
+            <Activity :size="15" />{{ apiOnline ? '数据已连接' : '接口待连接' }}
+          </span>
         </div>
       </div>
       <div class="tabs nav-rail">
-        <button :class="{ active: currentTab === 'dashboard' }" @click="currentTab = 'dashboard'">院内总览</button>
-        <button v-if="canUsePharmacy" :class="{ active: currentTab === 'pharmacy' }" @click="currentTab = 'pharmacy'">药库质控</button>
-        <button v-if="canUseNurse" :class="{ active: currentTab === 'nurse' }" @click="currentTab = 'nurse'">调剂发药</button>
-        <button v-if="canUsePharmacy" :class="{ active: currentTab === 'catalog' }" @click="currentTab = 'catalog'; loadCatalog()">药品档案</button>
-        <button v-if="canUsePharmacy" :class="{ active: currentTab === 'inventory' }" @click="currentTab = 'inventory'; loadInventory()">库存盘点</button>
-        <button v-if="isAdmin" :class="{ active: currentTab === 'audit' }" @click="currentTab = 'audit'; loadAudit()">审计报表</button>
-        <button v-if="isAdmin" :class="{ active: currentTab === 'users' }" @click="currentTab = 'users'; loadUsers()">用户管理</button>
+        <button :class="{ active: currentTab === 'dashboard' }" @click="currentTab = 'dashboard'"><LayoutDashboard />院内总览</button>
+        <button v-if="canUsePharmacy" :class="{ active: currentTab === 'pharmacy' }" @click="currentTab = 'pharmacy'"><PackageCheck />药库质控</button>
+        <button v-if="canUseNurse" :class="{ active: currentTab === 'nurse' }" @click="currentTab = 'nurse'"><Pill />调剂发药</button>
+        <button v-if="canUsePharmacy" :class="{ active: currentTab === 'catalog' }" @click="currentTab = 'catalog'; loadCatalog()"><BookOpen />药品档案</button>
+        <button v-if="canUsePharmacy" :class="{ active: currentTab === 'inventory' }" @click="currentTab = 'inventory'; loadInventory()"><ClipboardCheck />库存盘点</button>
+        <button v-if="isAdmin" :class="{ active: currentTab === 'audit' }" @click="currentTab = 'audit'; loadAudit()"><ChartNoAxesCombined />审计报表</button>
+        <button v-if="isAdmin" :class="{ active: currentTab === 'users' }" @click="currentTab = 'users'; loadUsers()"><Users />用户管理</button>
       </div>
     </div>
 
@@ -925,10 +944,10 @@ onMounted(() => restoreSession())
 
     <div v-if="currentTab === 'dashboard'" class="dashboard-layout">
       <div class="stat-cards">
-        <div class="card stat-blue"><h3>药品总库存</h3><div class="num">{{ totalStock }} <small>盒</small></div><p>覆盖 {{ totalInbound }} 条单品档案</p></div>
-        <div class="card stat-green"><h3>在库可调剂</h3><div class="num">{{ inStockCount }} <small>件</small></div><p>已出库 {{ outStockCount }} 件</p></div>
-        <div class="card stat-amber"><h3>近效期预警</h3><div class="num">{{ nearExpiryCount }} <small>件</small></div><p>90 天内到期需复核</p></div>
-        <div class="card stat-red"><h3>低库存预警</h3><div class="num">{{ lowStockCount }} <small>种</small></div><p>低于院内补货阈值</p></div>
+        <div class="card stat-blue"><h3><Boxes />药品总库存</h3><div class="num">{{ totalStock }} <small>盒</small></div><p>覆盖 {{ totalInbound }} 条单品档案</p></div>
+        <div class="card stat-green"><h3><CircleCheck />在库可调剂</h3><div class="num">{{ inStockCount }} <small>件</small></div><p>已出库 {{ outStockCount }} 件</p></div>
+        <div class="card stat-amber"><h3><CircleAlert />近效期预警</h3><div class="num">{{ nearExpiryCount }} <small>件</small></div><p>90 天内到期需复核</p></div>
+        <div class="card stat-red"><h3><ShieldCheck />低库存预警</h3><div class="num">{{ lowStockCount }} <small>种</small></div><p>低于院内补货阈值</p></div>
       </div>
       <div class="command-strip">
         <div class="command-item"><span>过期在库</span><strong>{{ enhancedAlerts.expired?.length || 0 }}</strong></div>
@@ -1044,8 +1063,8 @@ onMounted(() => restoreSession())
               <td :class="d.quantity<50?'low-stock':'normal-stock'">{{d.quantity}}</td>
               <!-- 近效期相关函数，供库存明细表质控列和看板预警列表使用 -->
               <td>
-                <span v-if="isNearExpiry(d.expireDate)" class="tag-warn">⚠️ 近效期</span>
-                <span v-else class="tag-ok">✅ 合格</span>
+                <span v-if="isNearExpiry(d.expireDate)" class="tag-warn"><CircleAlert />近效期</span>
+                <span v-else class="tag-ok"><CircleCheck />合格</span>
               </td>
               <td class="time">{{d.updateTime || '--'}}</td>
             </tr>
@@ -1073,7 +1092,7 @@ onMounted(() => restoreSession())
 
           <div class="scan-wrapper" v-if="todoPrescriptions.length">
             <div class="scan-row">
-              <input v-model="nurseScanCode" placeholder="🔫 扫描药盒核对..." @keyup.enter="dispenseByNurse" class="scan-input-lg"/>
+              <div class="scan-input-shell"><ScanLine /><input v-model="nurseScanCode" placeholder="扫描药盒追溯码" @keyup.enter="dispenseByNurse" class="scan-input-lg"/></div>
               <button @click="dispenseByNurse" class="btn-scan-confirm">确认发药</button>
             </div>
           </div>
@@ -1102,7 +1121,7 @@ onMounted(() => restoreSession())
       </div>
       
       <div class="right-col">
-        <h3>📜 实时流水 (含操作员)</h3>
+        <h3><Activity />实时流水 <small>含操作员</small></h3>
         <div class="logs">
           <div v-for="r in recordList" :key="r.id" class="log-item">
             <span class="mono">{{r.dispenseTime?.split(' ')[1]}}</span>
@@ -1349,7 +1368,7 @@ onMounted(() => restoreSession())
 
 
 <style scoped>
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700&display=swap');
 
 :global(*) {
   box-sizing: border-box;
@@ -3051,6 +3070,305 @@ table tbody tr:hover {
 
   .qq-header .connection-pill {
     width: 100%;
+  }
+}
+
+/* ui-ux-pro-max: healthcare data-dense refinement */
+:global(:root) {
+  --ink: #0f2238;
+  --muted: #52667b;
+  --line: #d9e3ec;
+  --page: #f4f7fa;
+  --blue: #087fda;
+  --blue-quiet: #e9f4fc;
+  --qq-blue: #087fda;
+  --qq-blue-deep: #075fa8;
+  --qq-blue-soft: #e8f4fc;
+  --qq-cyan: #0891b2;
+  --qq-green: #059669;
+  --qq-page: #f4f7fa;
+  --qq-line: #d9e3ec;
+  --shadow: 0 8px 24px rgba(15, 34, 56, 0.08);
+}
+
+:global(body),
+button,
+input,
+select,
+textarea {
+  font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+:global(body) {
+  background: #f4f7fa;
+  color: var(--ink);
+}
+
+button,
+[role="button"] {
+  cursor: pointer;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid rgba(8, 127, 218, 0.24);
+  outline-offset: 2px;
+}
+
+.qq-sidebar {
+  background: #087fda;
+  box-shadow: 4px 0 18px rgba(7, 95, 168, 0.14);
+}
+
+.qq-app-mark {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.qq-quick-actions button,
+.qq-sidebar-logout {
+  transition: color 180ms ease, background-color 180ms ease, border-color 180ms ease;
+}
+
+.qq-quick-actions button svg,
+.qq-sidebar-logout svg {
+  flex: 0 0 auto;
+  stroke-width: 2;
+}
+
+.qq-header {
+  border-color: #dce6ef;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 2px 10px rgba(15, 34, 56, 0.06);
+}
+
+.qq-header .nav-rail {
+  gap: 4px;
+  padding: 4px;
+  background: #f2f6f9;
+}
+
+.qq-header .tabs button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 38px;
+  border-radius: 6px;
+  transition: color 180ms ease, background-color 180ms ease, box-shadow 180ms ease;
+}
+
+.qq-header .tabs button svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: 2;
+}
+
+.qq-header .tabs button.active {
+  background: #087fda;
+  box-shadow: 0 2px 7px rgba(8, 127, 218, 0.2);
+}
+
+.connection-pill {
+  gap: 7px;
+  min-height: 38px;
+  border-radius: 6px;
+}
+
+.command-strip {
+  gap: 10px;
+}
+
+.command-item,
+.card,
+.chart-box,
+.table-card,
+.box,
+.left-col,
+.right-col,
+.expiry-alert-box,
+.recent-card {
+  border-color: #dce6ef;
+  box-shadow: 0 2px 8px rgba(15, 34, 56, 0.05);
+}
+
+.command-item {
+  min-height: 68px;
+  border-left-color: #0891b2;
+}
+
+.stat-cards .card {
+  min-height: 124px;
+  padding: 18px;
+  color: var(--ink);
+}
+
+.stat-cards .card h3,
+.right-col h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stat-cards .card h3 {
+  color: #52667b;
+}
+
+.stat-cards .card .num {
+  color: #0f2238;
+}
+
+.stat-cards .card p {
+  color: #65788c;
+}
+
+.stat-blue h3 svg { color: #087fda; }
+.stat-green h3 svg { color: #059669; }
+.stat-amber h3 svg { color: #d97706; }
+.stat-red h3 svg { color: #dc2626; }
+
+.stat-cards .card h3 svg,
+.right-col h3 > svg {
+  width: 18px;
+  height: 18px;
+}
+
+.right-col h3 small {
+  color: #65788c;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.card .num {
+  letter-spacing: 0;
+}
+
+.table-card {
+  overflow-x: auto;
+}
+
+table {
+  font-size: 13px;
+}
+
+table thead th {
+  border-bottom: 1px solid #cfdae4;
+  background: #edf3f7;
+  color: #3f5368;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+table tbody td {
+  border-bottom-color: #e7edf3;
+}
+
+table tbody tr {
+  transition: background-color 160ms ease;
+}
+
+.tag-warn,
+.tag-ok,
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.tag-warn svg,
+.tag-ok svg {
+  width: 14px;
+  height: 14px;
+}
+
+.scan-input-shell {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 1;
+  border: 1px solid #bfd0df;
+  border-radius: 6px;
+  background: #fff;
+  color: #087fda;
+  transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.scan-input-shell:focus-within {
+  border-color: #087fda;
+  box-shadow: 0 0 0 3px rgba(8, 127, 218, 0.12);
+}
+
+.scan-input-shell > svg {
+  width: 19px;
+  height: 19px;
+  margin-left: 13px;
+  flex: 0 0 auto;
+}
+
+.scan-input-shell .scan-input-lg {
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.scan-input-shell .scan-input-lg:focus {
+  box-shadow: none;
+}
+
+.login-panel {
+  border-color: #d7e2eb;
+  box-shadow: 0 16px 44px rgba(15, 64, 105, 0.14);
+}
+
+.login-brand {
+  background: #eef8fb;
+}
+
+.login-image-frame {
+  box-shadow: 0 8px 24px rgba(15, 64, 105, 0.12);
+}
+
+@media (max-width: 760px) {
+  .qq-sidebar {
+    background: #087fda;
+  }
+
+  .qq-header .tabs button {
+    border-radius: 6px;
+  }
+
+  .table-card,
+  .expiry-alert-box {
+    scrollbar-width: thin;
+  }
+}
+
+@media (max-width: 420px) {
+  .command-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .stat-cards .card {
+    min-height: 108px;
+  }
+
+  .qq-profile-block span {
+    font-size: 9px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }
 </style>
