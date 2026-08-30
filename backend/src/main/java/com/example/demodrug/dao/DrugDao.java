@@ -38,14 +38,15 @@ public class DrugDao {
         String packageUnit = safeText(drug.getPackageUnit(), "盒");
         String minUnit = safeText(drug.getMinUnit(), splitAllowed ? "片" : packageUnit);
         String stockType = splitAllowed ? StockType.SPLIT_PARENT : StockType.WHOLE;
-        String sql = "INSERT INTO drug_stock (drug_name, drug_code, trace_code, batch_number, quantity, expire_date, create_time, " +
+        String sql = "INSERT INTO drug_stock (catalog_id, drug_name, drug_code, trace_code, batch_number, quantity, expire_date, create_time, " +
                 "is_split_allowed, package_unit, min_unit, min_units_per_package, remaining_min_units, stock_type, status, version) " +
-                "VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, 0)";
+                "VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, 0)";
         String finalExpireDate = drug.getExpireDate();
         if (finalExpireDate != null && finalExpireDate.trim().isEmpty()) {
             finalExpireDate = null;
         }
         jdbcTemplate.update(sql,
+                drug.getCatalogId(),
                 drug.getDrugName(),
                 autoDrugCode,
                 drug.getTraceCode(),
@@ -103,11 +104,26 @@ public class DrugDao {
                            Integer dispenseUnits,
                            String dispenseUnit,
                            String dispenseType) {
+        saveRecord(traceCode, drugName, patientName, patientId, parentTraceCode, childTraceCode,
+                dispenseUnits, dispenseUnit, dispenseType, null, null);
+    }
+
+    public void saveRecord(String traceCode,
+                           String drugName,
+                           String patientName,
+                           String patientId,
+                           String parentTraceCode,
+                           String childTraceCode,
+                           Integer dispenseUnits,
+                           String dispenseUnit,
+                           String dispenseType,
+                           Long applicationId,
+                           Long applicationItemId) {
         String sql = "INSERT INTO dispense_record (trace_code, drug_name, patient_name, patient_id, dispense_time, " +
-                "parent_trace_code, child_trace_code, dispense_units, dispense_unit, dispense_type) " +
-                "VALUES (?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?)";
+                "parent_trace_code, child_trace_code, dispense_units, dispense_unit, dispense_type, application_id, application_item_id) " +
+                "VALUES (?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?)";
         jdbcTemplate.update(sql, traceCode, drugName, patientName, patientId, parentTraceCode, childTraceCode,
-                dispenseUnits, dispenseUnit, dispenseType);
+                dispenseUnits, dispenseUnit, dispenseType, applicationId, applicationItemId);
     }
 
     // 6. 获取所有记录

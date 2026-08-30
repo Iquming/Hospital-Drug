@@ -5,6 +5,7 @@ import java.util.Date;
 public class DrugStock {
 
     private Long id;
+    private Long catalogId;
     private String drugName;
     private String drugCode;
     private String traceCode;
@@ -39,6 +40,9 @@ public class DrugStock {
     }
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
+
+    public Long getCatalogId() { return catalogId; }
+    public void setCatalogId(Long catalogId) { this.catalogId = catalogId; }
 
     public String getDrugName() { return drugName; }
     public void setDrugName(String drugName) { this.drugName = drugName; }

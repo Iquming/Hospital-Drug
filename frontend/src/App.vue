@@ -10,16 +10,20 @@ import {
   CircleAlert,
   CircleCheck,
   ClipboardCheck,
+  ClipboardList,
   LayoutDashboard,
   LogOut,
   PackageCheck,
   Pill,
-  RefreshCw,
+  RadioTower,
   ScanLine,
   ShieldCheck,
   Users
 } from 'lucide-vue-next'
 import loginPharmacyHero from './assets/login-pharmacy-hero.png'
+import HisApplicationWorkbench from './components/HisApplicationWorkbench.vue'
+import HisIntegrationConsole from './components/HisIntegrationConsole.vue'
+import SidebarShortcuts from './components/SidebarShortcuts.vue'
 
 // --- 0. 基础配置 ---
 const api = axios.create({
@@ -46,7 +50,9 @@ const userInitial = computed(() => currentUser.value.slice(0, 1).toUpperCase())
 const activeModuleName = computed(() => ({
   dashboard: '院内总览',
   pharmacy: '药库质控',
-  nurse: '调剂发药',
+  hisApplications: '处方调剂',
+  hisIntegration: 'HIS联调中心',
+  nurse: '旧版调剂',
   catalog: '药品档案',
   inventory: '库存盘点',
   audit: '审计报表',
@@ -56,6 +62,7 @@ const isAuthenticated = computed(() => Boolean(authToken.value && authUser.value
 const isAdmin = computed(() => authUser.value?.role === 'ADMIN')
 const canUsePharmacy = computed(() => ['ADMIN', 'PHARMACIST'].includes(authUser.value?.role))
 const canUseNurse = computed(() => ['ADMIN', 'PHARMACIST', 'NURSE'].includes(authUser.value?.role))
+const canViewHisApplications = computed(() => ['ADMIN', 'PHARMACIST', 'NURSE'].includes(authUser.value?.role))
 
 const userList = ref([])
 const userForm = ref({ id: null, username: '', password: '', displayName: '', role: 'NURSE', department: '', status: 'ENABLED' })
@@ -811,6 +818,14 @@ const loadAudit = async () => {
   auditList.value = res.data
 }
 
+const navigateFromShortcut = async tab => {
+  currentTab.value = tab
+  if (tab === 'catalog') await loadCatalog()
+  if (tab === 'inventory') await loadInventory()
+  if (tab === 'audit') await loadAudit()
+  if (tab === 'users') await loadUsers()
+}
+
 const downloadReport = async (path) => {
   try {
     const res = await api.get(path, { responseType: 'blob' })
@@ -871,26 +886,12 @@ onMounted(() => restoreSession())
           <small>{{ authUser.department || '未设置科室' }}</small>
         </div>
 
-        <div class="qq-quick-actions" aria-label="快捷操作">
-          <button
-            :class="{ active: currentTab === 'dashboard' }"
-            title="返回院内总览"
-            @click="currentTab = 'dashboard'"
-          ><LayoutDashboard :size="19" /></button>
-          <button title="刷新当前数据" @click="refreshData"><RefreshCw :size="19" /></button>
-          <button
-            v-if="canUseNurse"
-            :class="{ active: currentTab === 'nurse' }"
-            title="进入调剂发药"
-            @click="currentTab = 'nurse'"
-          ><PackageCheck :size="19" /></button>
-          <button
-            v-if="isAdmin"
-            :class="{ active: currentTab === 'users' }"
-            title="进入用户管理"
-            @click="currentTab = 'users'; loadUsers()"
-          ><Users :size="19" /></button>
-        </div>
+        <SidebarShortcuts
+          :current-tab="currentTab"
+          :role="authUser.role"
+          :username="authUser.username"
+          @navigate="navigateFromShortcut"
+        />
 
         <button @click="logout" class="qq-sidebar-logout" title="退出登录"><LogOut :size="19" /></button>
       </aside>
@@ -915,9 +916,10 @@ onMounted(() => restoreSession())
       <div class="tabs nav-rail">
         <button :class="{ active: currentTab === 'dashboard' }" @click="currentTab = 'dashboard'"><LayoutDashboard />院内总览</button>
         <button v-if="canUsePharmacy" :class="{ active: currentTab === 'pharmacy' }" @click="currentTab = 'pharmacy'"><PackageCheck />药库质控</button>
-        <button v-if="canUseNurse" :class="{ active: currentTab === 'nurse' }" @click="currentTab = 'nurse'"><Pill />调剂发药</button>
+        <button v-if="canViewHisApplications" :class="{ active: currentTab === 'hisApplications' }" @click="currentTab = 'hisApplications'"><ClipboardList />处方调剂</button>
         <button v-if="canUsePharmacy" :class="{ active: currentTab === 'catalog' }" @click="currentTab = 'catalog'; loadCatalog()"><BookOpen />药品档案</button>
         <button v-if="canUsePharmacy" :class="{ active: currentTab === 'inventory' }" @click="currentTab = 'inventory'; loadInventory()"><ClipboardCheck />库存盘点</button>
+        <button v-if="isAdmin" :class="{ active: currentTab === 'hisIntegration' }" @click="currentTab = 'hisIntegration'"><RadioTower />HIS联调</button>
         <button v-if="isAdmin" :class="{ active: currentTab === 'audit' }" @click="currentTab = 'audit'; loadAudit()"><ChartNoAxesCombined />审计报表</button>
         <button v-if="isAdmin" :class="{ active: currentTab === 'users' }" @click="currentTab = 'users'; loadUsers()"><Users />用户管理</button>
       </div>
@@ -1072,6 +1074,17 @@ onMounted(() => restoreSession())
         </table>
       </div>
     </div>
+
+    <HisApplicationWorkbench
+      v-else-if="currentTab === 'hisApplications'"
+      :api="api"
+      :user-role="authUser.role"
+    />
+
+    <HisIntegrationConsole
+      v-else-if="currentTab === 'hisIntegration' && isAdmin"
+      :api="api"
+    />
 
     <div v-else-if="currentTab === 'nurse'" class="work-layout nurse-layout">
       <div class="left-col">

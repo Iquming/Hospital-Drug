@@ -51,6 +51,7 @@ public class DrugCatalogService {
         if (catalog == null) {
             return;
         }
+        drug.setCatalogId(catalog.getId());
         drug.setIsSplitAllowed(catalog.getIsSplitAllowed());
         drug.setPackageUnit(catalog.getPackageUnit());
         drug.setMinUnit(catalog.getMinUnit());

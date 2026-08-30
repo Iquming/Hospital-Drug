@@ -1,0 +1,184 @@
+package com.example.demodrug.service;
+
+import com.example.demodrug.constant.DispenseOperation;
+import com.example.demodrug.constant.DispenseType;
+import com.example.demodrug.constant.HisApplicationItemStatus;
+import com.example.demodrug.constant.StockStatus;
+import com.example.demodrug.dao.DrugDao;
+import com.example.demodrug.dao.HisIntegrationDao;
+import com.example.demodrug.entity.DrugApplication;
+import com.example.demodrug.entity.DrugApplicationItem;
+import com.example.demodrug.entity.DrugSplitCode;
+import com.example.demodrug.entity.DrugStock;
+import com.example.demodrug.exception.BusinessException;
+import com.example.demodrug.exception.ErrorCode;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
+
+import jakarta.annotation.Resource;
+
+@Service
+public class ApplicationDispenseService {
+
+    @Resource
+    private HisIntegrationDao hisIntegrationDao;
+
+    @Resource
+    private DrugDao drugDao;
+
+    @Resource
+    private HisApplicationService hisApplicationService;
+
+    @Resource
+    private HisCallbackService hisCallbackService;
+
+    @Resource
+    private AuditLogService auditLogService;
+
+    @Transactional(rollbackFor = Exception.class)
+    public DrugApplication dispense(Long itemId, String traceCode, String operator) {
+        DrugApplicationItem item = requireDispensableItem(itemId);
+        DrugApplication application = requireApplication(item.getApplicationId());
+        DispenseUnit scanned = resolveDispenseUnit(traceCode, item, false);
+
+        if (scanned.splitCode() != null) {
+            if (drugDao.markSplitDispensed(scanned.splitCode().getChildTraceCode(), application.getPatientId()) <= 0) {
+                throw new BusinessException(ErrorCode.STOCK_CONFLICT, "拆零子码已发放或状态已变化");
+            }
+        } else if (drugDao.dispenseDrug(scanned.stock().getTraceCode()) <= 0) {
+            throw new BusinessException(ErrorCode.STOCK_CONFLICT, "该追溯码已出库或库存状态异常");
+        }
+
+        if (hisIntegrationDao.addDispensedQuantity(itemId, scanned.quantity()) <= 0) {
+            throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "本次发药数量超过申请明细剩余数量");
+        }
+
+        drugDao.saveRecord(scanned.traceCode(), scanned.drugName(), application.getPatientName(),
+                application.getPatientId(), scanned.parentTraceCode(), scanned.childTraceCode(),
+                scanned.quantity(), scanned.unit(), scanned.dispenseType(), application.getId(), itemId);
+        String status = hisApplicationService.refreshStatus(application.getId());
+        hisCallbackService.enqueue(application.getId(), "DISPENSE_STATUS_CHANGED", operator);
+        auditLogService.record("HIS_APPLICATION_DISPENSE", "drug_application_item", String.valueOf(itemId),
+                item.getStatus(), status, "SUCCESS", scanned.traceCode() + " 操作人:" + operator);
+        return hisApplicationService.detail(application.getId());
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public DrugApplication returnDrug(Long itemId, String traceCode, String operator) {
+        DrugApplicationItem item = hisIntegrationDao.findItem(itemId);
+        if (item == null) {
+            throw new IllegalArgumentException("申请明细不存在");
+        }
+        if (!HisApplicationItemStatus.PARTIAL.equals(item.getStatus())
+                && !HisApplicationItemStatus.DISPENSED.equals(item.getStatus())) {
+            throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "该申请明细当前没有可退药数量");
+        }
+        DrugApplication application = requireApplication(item.getApplicationId());
+        DispenseUnit scanned = resolveDispenseUnit(traceCode, item, true);
+
+        if (scanned.splitCode() != null) {
+            if (drugDao.markSplitReturned(scanned.splitCode().getChildTraceCode()) <= 0) {
+                throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "拆零子码未发药或已经退回");
+            }
+            drugDao.restoreParentMinUnits(scanned.parentTraceCode(), scanned.quantity());
+        } else if (drugDao.restoreReturnedDrug(scanned.traceCode()) <= 0) {
+            throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "该追溯码未发药或已经退回");
+        }
+
+        if (hisIntegrationDao.addReturnedQuantity(itemId, scanned.quantity()) <= 0) {
+            throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "退药数量超过该明细已发数量");
+        }
+
+        String operation = scanned.splitCode() == null
+                ? DispenseOperation.RETURNED_BY_PATIENT : DispenseOperation.SPLIT_RETURNED_BY_PATIENT;
+        drugDao.saveRecord(scanned.traceCode(), scanned.drugName(), operation + " " + application.getPatientName(),
+                application.getPatientId(), scanned.parentTraceCode(), scanned.childTraceCode(),
+                scanned.quantity(), scanned.unit(), scanned.dispenseType(), application.getId(), itemId);
+        String status = hisApplicationService.refreshStatus(application.getId());
+        hisCallbackService.enqueue(application.getId(), "RETURN_STATUS_CHANGED", operator);
+        auditLogService.record("HIS_APPLICATION_RETURN", "drug_application_item", String.valueOf(itemId),
+                item.getStatus(), status, "SUCCESS", scanned.traceCode() + " 操作人:" + operator);
+        return hisApplicationService.detail(application.getId());
+    }
+
+    private DrugApplicationItem requireDispensableItem(Long itemId) {
+        DrugApplicationItem item = hisIntegrationDao.findItem(itemId);
+        if (item == null) {
+            throw new IllegalArgumentException("申请明细不存在");
+        }
+        if (item.getLocalCatalogId() == null || HisApplicationItemStatus.UNMAPPED.equals(item.getStatus())) {
+            throw new BusinessException(ErrorCode.HIS_MAPPING_REQUIRED, "该HIS药品编码尚未映射本地药品档案");
+        }
+        if (!HisApplicationItemStatus.PENDING.equals(item.getStatus())
+                && !HisApplicationItemStatus.PARTIAL.equals(item.getStatus())) {
+            throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "该申请明细当前不可发药");
+        }
+        return item;
+    }
+
+    private DrugApplication requireApplication(Long applicationId) {
+        DrugApplication application = hisIntegrationDao.findApplicationById(applicationId);
+        if (application == null) {
+            throw new IllegalArgumentException("HIS申请单不存在");
+        }
+        return application;
+    }
+
+    private DispenseUnit resolveDispenseUnit(String rawTraceCode, DrugApplicationItem item, boolean returning) {
+        String traceCode = requireText(rawTraceCode, "追溯码不能为空");
+        DrugSplitCode splitCode = drugDao.getSplitByChildTraceCode(traceCode);
+        if (splitCode != null) {
+            DrugStock parent = drugDao.getDrugByTraceCode(splitCode.getParentTraceCode());
+            requireCatalogMatch(parent, item);
+            requireUnitMatch(item.getUnit(), splitCode.getMinUnit());
+            return new DispenseUnit(traceCode, splitCode.getDrugName(), splitCode.getSplitUnits(),
+                    splitCode.getMinUnit(), DispenseType.SPLIT_PACKAGE, splitCode.getParentTraceCode(),
+                    splitCode.getChildTraceCode(), parent, splitCode);
+        }
+        DrugStock stock = drugDao.getDrugByTraceCode(traceCode);
+        if (stock == null) {
+            throw new IllegalArgumentException("系统中不存在该追溯码");
+        }
+        requireCatalogMatch(stock, item);
+        requireUnitMatch(item.getUnit(), safeText(stock.getPackageUnit(), "盒"));
+        if (!returning && stock.getQuantity() != null && stock.getQuantity() != 1) {
+            throw new BusinessException(ErrorCode.STOCK_CONFLICT, "整包装追溯码必须对应一个可核销包装");
+        }
+        return new DispenseUnit(traceCode, stock.getDrugName(), 1, safeText(stock.getPackageUnit(), "盒"),
+                DispenseType.WHOLE_PACKAGE, traceCode, null, stock, null);
+    }
+
+    private void requireCatalogMatch(DrugStock stock, DrugApplicationItem item) {
+        if (stock == null || stock.getCatalogId() == null) {
+            throw new BusinessException(ErrorCode.HIS_MAPPING_REQUIRED, "该库存尚未关联本地药品档案");
+        }
+        if (!stock.getCatalogId().equals(item.getLocalCatalogId())) {
+            throw new BusinessException(ErrorCode.PRESCRIPTION_MISMATCH,
+                    "扫码药品与HIS申请明细映射的本地药品不一致");
+        }
+    }
+
+    private void requireUnitMatch(String requestedUnit, String scannedUnit) {
+        if (!safeText(requestedUnit, "").equals(safeText(scannedUnit, ""))) {
+            throw new BusinessException(ErrorCode.PRESCRIPTION_MISMATCH,
+                    "扫码包装单位与申请明细单位不一致，应发单位：" + requestedUnit);
+        }
+    }
+
+    private String requireText(String value, String message) {
+        if (!StringUtils.hasText(value)) {
+            throw new IllegalArgumentException(message);
+        }
+        return value.trim();
+    }
+
+    private String safeText(String value, String fallback) {
+        return StringUtils.hasText(value) ? value.trim() : fallback;
+    }
+
+    private record DispenseUnit(String traceCode, String drugName, int quantity, String unit,
+                                String dispenseType, String parentTraceCode, String childTraceCode,
+                                DrugStock stock, DrugSplitCode splitCode) {
+    }
+}

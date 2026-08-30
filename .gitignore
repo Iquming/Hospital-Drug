@@ -11,6 +11,7 @@ backend/android-mediapipe-demo/
 # Node / Vue
 node_modules/
 dist/
+frontend/.npm-cache/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

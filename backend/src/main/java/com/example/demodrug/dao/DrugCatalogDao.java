@@ -29,6 +29,15 @@ public class DrugCatalogDao {
         }
     }
 
+    public DrugCatalog findById(Long id) {
+        try {
+            String sql = "SELECT * FROM drug_catalog WHERE id = ? AND status = 'ENABLED' LIMIT 1";
+            return jdbcTemplate.queryForObject(sql, new BeanPropertyRowMapper<>(DrugCatalog.class), id);
+        } catch (EmptyResultDataAccessException e) {
+            return null;
+        }
+    }
+
     public void create(DrugCatalog catalog) {
         String sql = "INSERT INTO drug_catalog (drug_name, specification, dosage_form, manufacturer, is_split_allowed, " +
                 "package_unit, min_unit, min_units_per_package, low_stock_threshold, status, create_time, update_time) " +
