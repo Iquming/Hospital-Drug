@@ -8,11 +8,11 @@
         <version>4.0.2</version>
         <relativePath/> <!-- lookup parent from repository -->
     </parent>
-    <groupId>com.example</groupId>
-    <artifactId>demo-drug</artifactId>
+    <groupId>com.hospital.pharmacy</groupId>
+    <artifactId>hospital-drug-backend</artifactId>
     <version>0.0.1-SNAPSHOT</version>
-    <name>demo-drug</name>
-    <description>demo-drug</description>
+    <name>Hospital Drug Backend</name>
+    <description>Hospital pharmacy workflow and HIS integration service</description>
     <url/>
     <licenses>
         <license/>

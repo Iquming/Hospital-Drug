@@ -1,22 +1,59 @@
 # Hospital-Drug
 
-医院药品闭环管理系统，包含 Spring Boot 后端、Vue 前端和 HIS 门诊处方申请闭环。
+医院药品闭环管理学习系统，用于熟悉医院门诊药房、药库、HIS 对接及药品追溯等常见业务流程。
 
-## 项目结构
+> 本项目为个人学习与业务流程演练项目，不用于真实诊疗决策或生产环境，也不应录入真实患者数据。
 
-- `backend/`：后端服务，默认端口 `8081`
-- `frontend/`：前端页面，默认端口 `5173`
+## 项目作用
 
-## 本地启动
+系统模拟 HIS 开立药品申请后，药房接收、匹配药品、扫码发药、退药并回传状态的完整闭环，帮助理解医院信息系统与药房工作台之间的协作方式。
 
-后端：
+主要功能：
+
+- HIS 门诊申请单接收、修订、撤销和幂等处理
+- HIS 药品编码与本地药品档案映射
+- 一单多药、逐项发药、分次发药和退药
+- 库存入库、出库、拆零、追溯码校验和效期预警
+- 发药状态异步回传、失败重试与人工补发
+- 库存盘点、审计日志、报表导出和用户权限
+- 管理员、药师、护士角色工作台及可配置常用功能
+
+## 技术架构
+
+```text
+Hospital-Drug/
+├─ backend/                 Spring Boot 后端服务
+│  ├─ sql/                  MySQL 初始化与升级脚本
+│  └─ src/                  业务代码与测试
+├─ frontend/                Vue 3 药房工作台
+│  ├─ public/               静态资源
+│  └─ src/                  页面、组件与图片资源
+├─ .gitignore
+└─ README.md
+```
+
+- 后端：Java 17、Spring Boot、Spring Security、Spring JDBC、MySQL
+- 前端：Vue 3、Vite、Axios、ECharts、Lucide Icons
+- 默认端口：前端 `5173`，后端 `8081`
+
+## 本地运行
+
+准备 MySQL 数据库：
+
+```sql
+CREATE DATABASE hospital_drug_system
+  DEFAULT CHARACTER SET utf8mb4
+  COLLATE utf8mb4_unicode_ci;
+```
+
+根据 [backend/sql/README.md](backend/sql/README.md) 执行数据库脚本，然后启动后端：
 
 ```powershell
 cd backend
 .\mvnw.cmd spring-boot:run
 ```
 
-前端：
+启动前端：
 
 ```powershell
 cd frontend
@@ -24,108 +61,48 @@ npm install
 npm run dev
 ```
 
-默认前端访问地址：
+访问 [http://127.0.0.1:5173/](http://127.0.0.1:5173/)。学习环境默认管理员账号为 `admin`，密码为 `123456`。
 
-```text
-http://127.0.0.1:5173/
-```
+## 环境配置
 
-默认后端接口地址：
+后端支持通过环境变量覆盖本地默认值：
 
-```text
-http://127.0.0.1:8081/
-```
+| 环境变量 | 作用 | 默认值 |
+| --- | --- | --- |
+| `DB_URL` | MySQL 连接地址 | `jdbc:mysql://localhost:3306/hospital_drug_system` |
+| `DB_USERNAME` | 数据库账号 | `root` |
+| `DB_PASSWORD` | 数据库密码 | `123456` |
+| `TOKEN_SECRET` | 登录令牌签名密钥 | 本地学习密钥 |
+| `CORS_ALLOWED_ORIGINS` | 允许访问后端的前端地址 | 本地开发地址 |
+| `HIS_MODE` | HIS 模式：`mock` 或 `rest` | `mock` |
+| `HIS_API_KEY` | HIS 接口认证密钥 | `his-demo-key` |
+| `HIS_STATUS_CALLBACK_URL` | 真实 HIS 状态回传地址 | 本地模拟地址 |
 
-## 数据库配置
+连接真实接口前应设置独立的数据库密码、令牌密钥和 HIS 密钥，不要继续使用学习环境默认值。
 
-后端默认连接：
+## HIS 闭环演练
 
-```text
-jdbc:mysql://localhost:3306/hospital_drug_system
-```
+1. 管理员进入“HIS 联调”，生成模拟门诊药品申请。
+2. 在“处方调剂”中完成 HIS 药品编码映射。
+3. 药师按申请明细扫码并分次或一次性发药。
+4. 系统在同一事务中核销库存、记录发药结果并创建回传任务。
+5. 在“HIS 联调”查看状态时间线、回传结果和异常补发。
+6. 对已发药明细执行退药，观察申请单最终转为 `RETURNED`。
 
-可以通过环境变量覆盖：
-
-- `DB_URL`
-- `DB_USERNAME`
-- `DB_PASSWORD`
-- `SERVER_PORT`
-- `CORS_ALLOWED_ORIGINS`
-
-## 数据库初始化与升级
-
-在 `hospital_drug_system` 数据库中按现有项目情况执行 SQL：
-
-1. 首次部署先准备原有的 `drug_stock`、`prescription` 和 `dispense_record` 基础表。
-2. 执行 `backend/sql/split_drug_schema.sql`。
-3. 执行 `backend/sql/concurrency_hardening_schema.sql`。
-4. 执行 `backend/sql/enhancement_schema.sql` 和 `backend/sql/user_table.sql`。
-5. 最后执行 `backend/sql/his_integration_schema.sql`。
-
-`his_integration_schema.sql` 会创建申请单、申请明细、HIS 药品编码映射、入站事件和状态回传队列，并为库存及发药流水补充关联字段。
-
-## HIS 运行模式
-
-默认使用本地模拟 HIS：
-
-```text
-HIS_MODE=mock
-HIS_API_KEY=his-demo-key
-```
-
-管理员登录后进入“HIS联调”，可以生成模拟门诊处方。药房在“处方调剂”中完成药品映射和扫码发药，状态回传会在联调中心显示为已送达。
-
-连接真实 REST HIS 时设置：
-
-```text
-HIS_MODE=rest
-HIS_API_KEY=由HIS与药房约定的接口密钥
-HIS_STATUS_CALLBACK_URL=http://his-address/api/his/drug-application-status
-HIS_CONNECT_TIMEOUT_MS=3000
-HIS_READ_TIMEOUT_MS=5000
-```
-
-HIS 向药房推送申请单：
+真实 HIS 可通过以下接口推送申请：
 
 ```http
 POST /api/integration/his/v1/drug-applications
-X-HIS-Key: his-demo-key
+X-HIS-Key: <HIS_API_KEY>
 Content-Type: application/json
 ```
 
-示例请求：
+## 验证命令
 
-```json
-{
-  "eventId": "HIS-EVENT-20260830-001",
-  "sourceSystem": "HIS",
-  "applicationNo": "HIS-OP-20260830-001",
-  "revision": 1,
-  "patientId": "P001",
-  "patientName": "张三",
-  "encounterNo": "OP-20260830-001",
-  "departmentCode": "OPD",
-  "departmentName": "门诊部",
-  "priority": "NORMAL",
-  "prescribedAt": "2026-08-30T10:30:00",
-  "items": [
-    {
-      "itemNo": "ITEM-1",
-      "hisDrugCode": "HIS-DRUG-001",
-      "drugName": "阿莫西林胶囊",
-      "specification": "0.25g*24粒",
-      "quantity": 1,
-      "unit": "盒"
-    }
-  ]
-}
+```powershell
+cd backend
+.\mvnw.cmd test
+
+cd ..\frontend
+npm run build
 ```
-
-HIS 撤销尚未发药的申请单：
-
-```http
-POST /api/integration/his/v1/drug-applications/{applicationNo}/cancel?sourceSystem=HIS
-X-HIS-Key: his-demo-key
-```
-
-如果申请单已经发药，接口返回 `HIS_RETURN_REQUIRED`，药房必须先完成退药。状态回传失败会自动重试 5 次，最终失败后可在“HIS联调”中人工补发。
