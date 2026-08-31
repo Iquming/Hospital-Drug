@@ -7,6 +7,7 @@ import com.hospital.pharmacy.entity.HisCallbackEvent;
 import com.hospital.pharmacy.entity.HisDrugMapping;
 import org.springframework.jdbc.core.BeanPropertyRowMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Repository;
@@ -35,10 +36,20 @@ public class HisIntegrationDao {
 
     public void saveInboundEvent(String eventId, Long applicationId, String eventType,
                                  String resultStatus, String responseJson) {
-        jdbcTemplate.update("INSERT INTO his_inbound_event " +
-                        "(event_id, application_id, event_type, result_status, response_json, create_time) " +
-                        "VALUES (?, ?, ?, ?, ?, NOW())",
-                eventId, applicationId, eventType, resultStatus, responseJson);
+        jdbcTemplate.update("UPDATE his_inbound_event SET application_id = ?, event_type = ?, result_status = ?, " +
+                        "response_json = ? WHERE event_id = ?",
+                applicationId, eventType, resultStatus, responseJson, eventId);
+    }
+
+    public boolean reserveInboundEvent(String eventId, String eventType) {
+        try {
+            return jdbcTemplate.update("INSERT INTO his_inbound_event " +
+                            "(event_id, application_id, event_type, result_status, response_json, create_time) " +
+                            "VALUES (?, NULL, ?, 'PROCESSING', NULL, NOW())",
+                    eventId, eventType) > 0;
+        } catch (DuplicateKeyException e) {
+            return false;
+        }
     }
 
     public DrugApplication findApplication(String sourceSystem, String applicationNo) {
@@ -56,8 +67,9 @@ public class HisIntegrationDao {
 
     public Long createApplication(HisDtos.ApplicationRequest request, String status) {
         String sql = "INSERT INTO drug_application (source_system, his_application_no, revision_no, patient_id, " +
-                "patient_name, encounter_no, department_code, department_name, priority, status, prescribed_at, " +
-                "received_at, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())";
+                "patient_name, patient_gender, patient_age, encounter_no, department_code, department_name, priority, status, prescribed_at, " +
+                "prescriber_id, prescriber_name, diagnosis, allergy_info, review_status, received_at, update_time) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', NOW(), NOW())";
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbcTemplate.update(connection -> {
             PreparedStatement statement = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
@@ -66,16 +78,22 @@ public class HisIntegrationDao {
             statement.setInt(3, request.revision());
             statement.setString(4, request.patientId());
             statement.setString(5, request.patientName());
-            statement.setString(6, request.encounterNo());
-            statement.setString(7, request.departmentCode());
-            statement.setString(8, request.departmentName());
-            statement.setString(9, request.priority());
-            statement.setString(10, status);
+            statement.setString(6, request.patientGender());
+            if (request.patientAge() == null) statement.setNull(7, java.sql.Types.INTEGER); else statement.setInt(7, request.patientAge());
+            statement.setString(8, request.encounterNo());
+            statement.setString(9, request.departmentCode());
+            statement.setString(10, request.departmentName());
+            statement.setString(11, request.priority());
+            statement.setString(12, status);
             if (request.prescribedAt() == null) {
-                statement.setTimestamp(11, null);
+                statement.setTimestamp(13, null);
             } else {
-                statement.setTimestamp(11, Timestamp.valueOf(request.prescribedAt()));
+                statement.setTimestamp(13, Timestamp.valueOf(request.prescribedAt()));
             }
+            statement.setString(14, request.prescriberId());
+            statement.setString(15, request.prescriberName());
+            statement.setString(16, request.diagnosis());
+            statement.setString(17, request.allergyInfo());
             return statement;
         }, keyHolder);
         if (keyHolder.getKey() == null) {
@@ -86,10 +104,13 @@ public class HisIntegrationDao {
 
     public void updateApplication(Long id, HisDtos.ApplicationRequest request) {
         jdbcTemplate.update("UPDATE drug_application SET revision_no = ?, patient_id = ?, patient_name = ?, " +
-                        "encounter_no = ?, department_code = ?, department_name = ?, priority = ?, prescribed_at = ?, " +
-                        "status = ?, cancel_reason = NULL, update_time = NOW() WHERE id = ?",
-                request.revision(), request.patientId(), request.patientName(), request.encounterNo(),
+                        "patient_gender = ?, patient_age = ?, encounter_no = ?, department_code = ?, department_name = ?, priority = ?, prescribed_at = ?, " +
+                        "prescriber_id = ?, prescriber_name = ?, diagnosis = ?, allergy_info = ?, status = ?, " +
+                        "review_status = 'PENDING', review_comment = NULL, reviewed_by = NULL, reviewed_at = NULL, " +
+                        "cancel_reason = NULL, update_time = NOW() WHERE id = ?",
+                request.revision(), request.patientId(), request.patientName(), request.patientGender(), request.patientAge(), request.encounterNo(),
                 request.departmentCode(), request.departmentName(), request.priority(), request.prescribedAt(),
+                request.prescriberId(), request.prescriberName(), request.diagnosis(), request.allergyInfo(),
                 "RECEIVED", id);
     }
 
@@ -108,10 +129,11 @@ public class HisIntegrationDao {
                                       Long catalogId, String status) {
         jdbcTemplate.update("INSERT INTO drug_application_item (application_id, his_item_no, his_drug_code, " +
                         "local_catalog_id, drug_name, specification, requested_quantity, dispensed_quantity, " +
-                        "returned_quantity, unit, status, create_time, update_time) " +
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, NOW(), NOW())",
+                        "returned_quantity, unit, dosage, frequency, administration_route, usage_instruction, " +
+                        "status, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, NOW(), NOW())",
                 applicationId, item.itemNo(), item.hisDrugCode(), catalogId, item.drugName(),
-                item.specification(), item.quantity(), item.unit(), status);
+                item.specification(), item.quantity(), item.unit(), item.dosage(), item.frequency(),
+                item.administrationRoute(), item.usageInstruction(), status);
     }
 
     public List<DrugApplication> listApplications(String status, String keyword, String priority) {
@@ -185,6 +207,26 @@ public class HisIntegrationDao {
         return value != null && value > 0;
     }
 
+    public boolean hasCurrentDispensedQuantity(Long applicationId) {
+        Integer value = jdbcTemplate.queryForObject(
+                "SELECT COALESCE(SUM(dispensed_quantity), 0) FROM drug_application_item WHERE application_id = ?",
+                Integer.class, applicationId);
+        return value != null && value > 0;
+    }
+
+    public void markReturnRequired(Long applicationId, String reason) {
+        jdbcTemplate.update("UPDATE drug_application SET status = 'RETURN_REQUIRED', cancel_reason = ?, " +
+                "update_time = NOW() WHERE id = ?", reason, applicationId);
+    }
+
+    public int reviewApplication(Long applicationId, String reviewStatus, String comment, String reviewer) {
+        return jdbcTemplate.update("UPDATE drug_application SET review_status = ?, review_comment = ?, reviewed_by = ?, " +
+                        "reviewed_at = NOW(), status = ?, update_time = NOW() WHERE id = ? " +
+                        "AND status NOT IN ('PARTIALLY_DISPENSED', 'DISPENSED', 'RETURN_REQUIRED', 'RETURNED', 'CANCELLED')",
+                reviewStatus, comment, reviewer,
+                "APPROVED".equals(reviewStatus) ? "READY" : "REVIEW_REJECTED", applicationId);
+    }
+
     public int cancelApplication(Long applicationId, String reason) {
         jdbcTemplate.update("UPDATE drug_application_item SET status = 'CANCELLED', update_time = NOW() " +
                 "WHERE application_id = ? AND dispensed_quantity = 0", applicationId);
@@ -246,6 +288,13 @@ public class HisIntegrationDao {
     public int markCallbackProcessing(Long id) {
         return jdbcTemplate.update("UPDATE his_callback_event SET status = 'PROCESSING', update_time = NOW() " +
                 "WHERE id = ? AND status = 'PENDING'", id);
+    }
+
+    public int recoverStaleCallbacks(LocalDateTime staleBefore) {
+        return jdbcTemplate.update("UPDATE his_callback_event SET status = 'PENDING', next_retry_time = NOW(), " +
+                        "last_error = '发送进程中断，系统已自动恢复', update_time = NOW() " +
+                        "WHERE status = 'PROCESSING' AND update_time < ?",
+                Timestamp.valueOf(staleBefore));
     }
 
     public void markCallbackSent(Long id, String responseBody) {

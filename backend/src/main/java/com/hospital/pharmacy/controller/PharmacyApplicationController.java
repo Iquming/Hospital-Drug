@@ -8,6 +8,7 @@ import com.hospital.pharmacy.security.SecurityUtils;
 import com.hospital.pharmacy.service.ApplicationDispenseService;
 import com.hospital.pharmacy.service.HisApplicationService;
 import com.hospital.pharmacy.service.HisCallbackService;
+import com.hospital.pharmacy.service.IdempotencyService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.*;
 
@@ -26,6 +27,9 @@ public class PharmacyApplicationController {
 
     @Resource
     private HisCallbackService hisCallbackService;
+
+    @Resource
+    private IdempotencyService idempotencyService;
 
     @Value("${app.his.mode:mock}")
     private String hisMode;
@@ -59,14 +63,27 @@ public class PharmacyApplicationController {
 
     @PostMapping("/api/pharmacy/application-items/{itemId}/dispense")
     public DrugApplication dispense(@PathVariable Long itemId, @RequestBody HisDtos.DispenseRequest request) {
-        return applicationDispenseService.dispense(itemId, request.traceCode(),
-                SecurityUtils.currentUser().operatorLabel());
+        String operator = SecurityUtils.currentUser().operatorLabel();
+        return idempotencyService.execute(request == null ? null : request.requestId(),
+                "HIS_APPLICATION_DISPENSE", String.valueOf(itemId), operator,
+                Map.of("itemId", itemId, "traceCode", request == null ? "" : request.traceCode()),
+                () -> applicationDispenseService.dispense(itemId, request == null ? null : request.traceCode(), operator),
+                DrugApplication.class);
     }
 
     @PostMapping("/api/pharmacy/application-items/{itemId}/return")
     public DrugApplication returnDrug(@PathVariable Long itemId, @RequestBody HisDtos.ReturnRequest request) {
-        return applicationDispenseService.returnDrug(itemId, request.traceCode(),
-                SecurityUtils.currentUser().operatorLabel());
+        String operator = SecurityUtils.currentUser().operatorLabel();
+        return idempotencyService.execute(request == null ? null : request.requestId(),
+                "HIS_APPLICATION_RETURN", String.valueOf(itemId), operator,
+                Map.of("itemId", itemId, "traceCode", request == null ? "" : request.traceCode()),
+                () -> applicationDispenseService.returnDrug(itemId, request == null ? null : request.traceCode(), operator),
+                DrugApplication.class);
+    }
+
+    @PostMapping("/api/pharmacy/applications/{id}/review")
+    public DrugApplication review(@PathVariable Long id, @RequestBody HisDtos.ReviewRequest request) {
+        return hisApplicationService.review(id, request, SecurityUtils.currentUser().operatorLabel());
     }
 
     @GetMapping("/api/his/callbacks")

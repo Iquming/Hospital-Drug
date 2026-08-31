@@ -10,6 +10,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 import jakarta.annotation.Resource;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeParseException;
 
 /**
  * 对应论文 5.2.1 节：基于追溯码的药品入库验收服务类
@@ -37,6 +40,7 @@ public class DrugAcceptanceService {
         if (!StringUtils.hasText(drug.getDrugName())) {
             throw new IllegalArgumentException("药品名称不能为空");
         }
+        requireValidExpiry(drug.getExpireDate());
 
         String traceCode = drug.getTraceCode().trim();
         String drugName = drug.getDrugName().trim();
@@ -70,5 +74,22 @@ public class DrugAcceptanceService {
                 "操作人:" + operator
         );
         auditLogService.record(DispenseOperation.DRUG_INBOUND, "drug_stock", traceCode, null, drugName, "SUCCESS", DispenseOperation.INBOUND_SCAN_AUDIT);
+    }
+
+    private void requireValidExpiry(String value) {
+        if (!StringUtils.hasText(value)) {
+            throw new IllegalArgumentException("药品有效期不能为空");
+        }
+        try {
+            String normalized = value.trim();
+            LocalDate expiry = normalized.length() >= 10
+                    ? LocalDate.parse(normalized.substring(0, 10))
+                    : LocalDateTime.parse(normalized).toLocalDate();
+            if (expiry.isBefore(LocalDate.now())) {
+                throw new BusinessException(ErrorCode.STOCK_CONFLICT, "入库拦截：药品已超过有效期");
+            }
+        } catch (DateTimeParseException | IndexOutOfBoundsException e) {
+            throw new IllegalArgumentException("药品有效期格式无效，应为 yyyy-MM-dd");
+        }
     }
 }

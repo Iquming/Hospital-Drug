@@ -7,6 +7,8 @@ import com.hospital.pharmacy.exception.ErrorCode;
 import org.springframework.stereotype.Service;
 import org.springframework.util.DigestUtils;
 import org.springframework.util.StringUtils;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
 
 import jakarta.annotation.Resource;
 import java.nio.charset.StandardCharsets;
@@ -25,6 +27,9 @@ public class IdempotencyService {
 
     @Resource
     private AuditLogService auditLogService;
+
+    @Resource
+    private ObjectMapper objectMapper;
 
     public <T> T execute(String requestId,
                          String action,
@@ -49,7 +54,10 @@ public class IdempotencyService {
                 auditLogService.record("IDEMPOTENT_REPLAY", action, targetId, null, existing.getResponseBody(), "SUCCESS", "重复请求返回首次结果");
                 return convert(existing.getResponseBody(), resultType);
             }
-            throw new BusinessException(ErrorCode.IDEMPOTENT_PROCESSING, "请求正在处理中，请稍后重试", normalizedRequestId);
+            if (!"FAILED".equals(existing.getStatus())
+                    || !idempotentRequestDao.restartFailed(normalizedRequestId, requestHash)) {
+                throw new BusinessException(ErrorCode.IDEMPOTENT_PROCESSING, "请求正在处理中，请稍后重试", normalizedRequestId);
+            }
         }
 
         try {
@@ -83,23 +91,22 @@ public class IdempotencyService {
     }
 
     private String stringify(Object value) {
-        if (value instanceof Map<?, ?> map) {
-            StringBuilder encoded = new StringBuilder("M:");
-            for (Map.Entry<?, ?> entry : map.entrySet()) {
-                if (encoded.length() > 2) {
-                    encoded.append('&');
-                }
-                encoded.append(base64(String.valueOf(entry.getKey())))
-                        .append('=')
-                        .append(base64(entry.getValue() == null ? "" : String.valueOf(entry.getValue())));
-            }
-            return encoded.toString();
+        try {
+            return "J:" + base64(objectMapper.writeValueAsString(value));
+        } catch (JacksonException e) {
+            throw new IllegalStateException("幂等响应序列化失败", e);
         }
-        return "S:" + base64(value == null ? "" : String.valueOf(value));
     }
 
     @SuppressWarnings("unchecked")
     private <T> T convert(String value, Class<T> type) {
+        if (value != null && value.startsWith("J:")) {
+            try {
+                return objectMapper.readValue(unbase64(value.substring(2)), type);
+            } catch (JacksonException e) {
+                throw new IllegalStateException("幂等响应读取失败", e);
+            }
+        }
         if (String.class.equals(type)) {
             return (T) decodeString(value);
         }

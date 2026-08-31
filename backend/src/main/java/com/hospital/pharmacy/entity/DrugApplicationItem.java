@@ -15,6 +15,10 @@ public class DrugApplicationItem {
     private String localDrugName;
     private String drugName;
     private String specification;
+    private String dosage;
+    private String frequency;
+    private String administrationRoute;
+    private String usageInstruction;
     private Integer requestedQuantity;
     private Integer dispensedQuantity;
     private Integer returnedQuantity;

@@ -14,11 +14,17 @@ public final class HisDtos {
             Integer revision,
             String patientId,
             String patientName,
+            String patientGender,
+            Integer patientAge,
             String encounterNo,
             String departmentCode,
             String departmentName,
             String priority,
             LocalDateTime prescribedAt,
+            String prescriberId,
+            String prescriberName,
+            String diagnosis,
+            String allergyInfo,
             List<ApplicationItemRequest> items
     ) {
     }
@@ -29,7 +35,11 @@ public final class HisDtos {
             String drugName,
             String specification,
             Integer quantity,
-            String unit
+            String unit,
+            String dosage,
+            String frequency,
+            String administrationRoute,
+            String usageInstruction
     ) {
     }
 
@@ -50,6 +60,9 @@ public final class HisDtos {
     }
 
     public record ReturnRequest(String requestId, String traceCode) {
+    }
+
+    public record ReviewRequest(String decision, String comment) {
     }
 
     public record MappingRequest(String sourceSystem, String hisDrugCode, Long localCatalogId) {

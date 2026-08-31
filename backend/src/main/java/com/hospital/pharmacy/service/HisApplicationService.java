@@ -23,6 +23,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
 
 @Service
 public class HisApplicationService {
@@ -54,6 +56,19 @@ public class HisApplicationService {
             } catch (JacksonException e) {
                 throw new IllegalStateException("重复HIS事件响应读取失败", e);
             }
+        }
+        if (!hisIntegrationDao.reserveInboundEvent(request.eventId(), "APPLICATION_RECEIVED")) {
+            existingResponse = hisIntegrationDao.findInboundResponse(request.eventId());
+            if (existingResponse != null) {
+                try {
+                    HisDtos.ReceiveResponse response = objectMapper.readValue(existingResponse, HisDtos.ReceiveResponse.class);
+                    return new HisDtos.ReceiveResponse(response.eventId(), response.localApplicationId(),
+                            response.applicationNo(), response.status(), true, response.warnings());
+                } catch (JacksonException e) {
+                    throw new IllegalStateException("重复HIS事件响应读取失败", e);
+                }
+            }
+            throw new BusinessException(ErrorCode.IDEMPOTENT_PROCESSING, "HIS事件正在处理中", request.eventId());
         }
 
         DrugApplication existing = hisIntegrationDao.findApplication(request.sourceSystem(), request.applicationNo());
@@ -122,25 +137,65 @@ public class HisApplicationService {
                 throw new IllegalStateException("重复撤销事件响应读取失败", e);
             }
         }
+        if (!hisIntegrationDao.reserveInboundEvent(request.eventId().trim(), "APPLICATION_CANCELLED")) {
+            throw new BusinessException(ErrorCode.IDEMPOTENT_PROCESSING, "HIS撤销事件正在处理中", request.eventId());
+        }
         DrugApplication application = hisIntegrationDao.findApplication(
                 textOr(sourceSystem, "HIS"), requireText(applicationNo, "申请单号不能为空"));
         if (application == null) {
             throw new IllegalArgumentException("HIS申请单不存在");
         }
-        if (hisIntegrationDao.hasDispensedQuantity(application.getId())) {
-            throw new BusinessException(ErrorCode.HIS_RETURN_REQUIRED,
-                    "申请单已发生发药，必须先完成退药，不能直接撤销", request.eventId());
+        if (request.revision() != null && !request.revision().equals(application.getRevisionNo())) {
+            throw new BusinessException(ErrorCode.HIS_REVISION_CONFLICT,
+                    "撤销版本与当前申请单版本不一致", request.eventId());
         }
-        hisIntegrationDao.cancelApplication(application.getId(), textOr(request.reason(), "HIS撤销"));
+        String responseStatus;
+        String message;
+        if (hisIntegrationDao.hasCurrentDispensedQuantity(application.getId())) {
+            hisIntegrationDao.markReturnRequired(application.getId(), textOr(request.reason(), "HIS撤销"));
+            responseStatus = HisApplicationStatus.RETURN_REQUIRED;
+            message = "申请单已发生发药，请完成原路退药";
+        } else if (hisIntegrationDao.hasDispensedQuantity(application.getId())) {
+            hisIntegrationDao.updateApplicationStatus(application.getId(), HisApplicationStatus.RETURNED);
+            responseStatus = HisApplicationStatus.RETURNED;
+            message = "已发药品均已退回，申请单结束";
+        } else {
+            hisIntegrationDao.cancelApplication(application.getId(), textOr(request.reason(), "HIS撤销"));
+            responseStatus = HisApplicationStatus.CANCELLED;
+            message = "申请单已撤销";
+        }
         hisCallbackService.enqueue(application.getId(), "APPLICATION_CANCELLED", "HIS接口");
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("eventId", request.eventId());
         response.put("applicationNo", applicationNo);
-        response.put("status", HisApplicationStatus.CANCELLED);
-        response.put("message", "申请单已撤销");
+        response.put("status", responseStatus);
+        response.put("message", message);
         hisIntegrationDao.saveInboundEvent(request.eventId(), application.getId(), "APPLICATION_CANCELLED",
                 "ACCEPTED", toJson(response));
+        auditLogService.record("HIS_APPLICATION_CANCEL", "drug_application", String.valueOf(application.getId()),
+                application.getStatus(), responseStatus, "SUCCESS", message);
         return response;
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public DrugApplication review(Long applicationId, HisDtos.ReviewRequest request, String reviewer) {
+        DrugApplication application = detail(applicationId);
+        String decision = requireText(request == null ? null : request.decision(), "审方结论不能为空").toUpperCase();
+        if (!"APPROVED".equals(decision) && !"REJECTED".equals(decision)) {
+            throw new IllegalArgumentException("审方结论只能是 APPROVED 或 REJECTED");
+        }
+        if (HisApplicationStatus.MAPPING_REQUIRED.equals(application.getStatus())) {
+            throw new BusinessException(ErrorCode.HIS_MAPPING_REQUIRED, "存在未匹配药品，不能完成审方");
+        }
+        String comment = textOr(request.comment(), "APPROVED".equals(decision) ? "处方审核通过" : "处方审核不通过");
+        if (hisIntegrationDao.reviewApplication(applicationId, decision, comment, reviewer) <= 0) {
+            throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "当前申请单状态不允许审方");
+        }
+        String status = refreshStatus(applicationId);
+        hisCallbackService.enqueue(applicationId, "PRESCRIPTION_REVIEWED", reviewer);
+        auditLogService.record("PRESCRIPTION_REVIEW", "drug_application", String.valueOf(applicationId),
+                application.getReviewStatus(), decision, "SUCCESS", comment + " 操作人:" + reviewer);
+        return detail(applicationId);
     }
 
     public List<HisDrugMapping> mappings() {
@@ -164,7 +219,7 @@ public class HisApplicationService {
             String before = hisIntegrationDao.findApplicationById(applicationId).getStatus();
             String after = refreshStatus(applicationId);
             if (!before.equals(after)) {
-                hisCallbackService.enqueue(applicationId, "APPLICATION_READY", operator);
+                hisCallbackService.enqueue(applicationId, "APPLICATION_MAPPING_COMPLETED", operator);
             }
         }
         auditLogService.record("HIS_DRUG_MAPPING", "his_drug_mapping", sourceSystem + ":" + hisDrugCode,
@@ -185,10 +240,16 @@ public class HisApplicationService {
         int returned = number(totals.get("returned_quantity"));
         int unmapped = number(totals.get("unmapped_count"));
         String status;
-        if (unmapped > 0) {
-            status = HisApplicationStatus.MAPPING_REQUIRED;
-        } else if (requested > 0 && dispensed == 0 && returned >= requested) {
+        if (HisApplicationStatus.RETURN_REQUIRED.equals(application.getStatus()) && dispensed > 0) {
+            status = HisApplicationStatus.RETURN_REQUIRED;
+        } else if (dispensed == 0 && returned > 0) {
             status = HisApplicationStatus.RETURNED;
+        } else if (unmapped > 0) {
+            status = HisApplicationStatus.MAPPING_REQUIRED;
+        } else if ("REJECTED".equals(application.getReviewStatus())) {
+            status = HisApplicationStatus.REVIEW_REJECTED;
+        } else if (!"APPROVED".equals(application.getReviewStatus())) {
+            status = HisApplicationStatus.REVIEW_PENDING;
         } else if (requested > 0 && dispensed >= requested) {
             status = HisApplicationStatus.DISPENSED;
         } else if (dispensed > 0) {
@@ -209,24 +270,53 @@ public class HisApplicationService {
         String applicationNo = requireText(request.applicationNo(), "申请单号不能为空");
         String patientId = requireText(request.patientId(), "患者编号不能为空");
         String patientName = requireText(request.patientName(), "患者姓名不能为空");
+        String patientGender = requireText(request.patientGender(), "患者性别不能为空");
+        if (request.patientAge() == null || request.patientAge() < 0 || request.patientAge() > 150) {
+            throw new IllegalArgumentException("患者年龄必须在0至150岁之间");
+        }
         int revision = request.revision() == null || request.revision() <= 0 ? 1 : request.revision();
+        String priority = textOr(request.priority(), "NORMAL").toUpperCase();
+        if (!"NORMAL".equals(priority) && !"URGENT".equals(priority)) {
+            throw new IllegalArgumentException("优先级只能是 NORMAL 或 URGENT");
+        }
+        if (request.prescribedAt() == null) {
+            throw new IllegalArgumentException("处方开立时间不能为空");
+        }
         if (request.items() == null || request.items().isEmpty()) {
             throw new IllegalArgumentException("申请单至少需要一条药品明细");
         }
+        if (request.items().size() > 100) {
+            throw new IllegalArgumentException("单张申请单药品明细不能超过100条");
+        }
         List<HisDtos.ApplicationItemRequest> items = new ArrayList<>();
+        Set<String> itemNumbers = new HashSet<>();
         for (HisDtos.ApplicationItemRequest item : request.items()) {
             if (item == null || item.quantity() == null || item.quantity() <= 0) {
                 throw new IllegalArgumentException("药品明细数量必须大于0");
             }
+            String itemNo = requireText(item.itemNo(), "明细编号不能为空");
+            if (!itemNumbers.add(itemNo)) {
+                throw new IllegalArgumentException("药品明细编号不能重复：" + itemNo);
+            }
             items.add(new HisDtos.ApplicationItemRequest(
-                    requireText(item.itemNo(), "明细编号不能为空"),
+                    itemNo,
                     requireText(item.hisDrugCode(), "HIS药品编码不能为空"),
                     requireText(item.drugName(), "药品名称不能为空"),
-                    item.specification(), item.quantity(), requireText(item.unit(), "发药单位不能为空")));
+                    item.specification(), item.quantity(), requireText(item.unit(), "发药单位不能为空"),
+                    requireText(item.dosage(), "单次剂量不能为空"),
+                    requireText(item.frequency(), "用药频次不能为空"),
+                    requireText(item.administrationRoute(), "给药途径不能为空"), item.usageInstruction()));
         }
         return new HisDtos.ApplicationRequest(eventId, source, applicationNo, revision, patientId, patientName,
-                request.encounterNo(), request.departmentCode(), request.departmentName(),
-                textOr(request.priority(), "NORMAL").toUpperCase(), request.prescribedAt(), items);
+                patientGender, request.patientAge(),
+                requireText(request.encounterNo(), "就诊号不能为空"),
+                requireText(request.departmentCode(), "科室编码不能为空"),
+                requireText(request.departmentName(), "科室名称不能为空"),
+                priority, request.prescribedAt(),
+                requireText(request.prescriberId(), "处方医师编号不能为空"),
+                requireText(request.prescriberName(), "处方医师姓名不能为空"),
+                requireText(request.diagnosis(), "临床诊断不能为空"),
+                requireText(request.allergyInfo(), "过敏史信息不能为空"), items);
     }
 
     private String toJson(Object value) {

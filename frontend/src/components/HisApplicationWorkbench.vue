@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { AlertTriangle, ArrowDownToLine, ClipboardList, RefreshCw, RotateCcw, Search } from 'lucide-vue-next'
+import { AlertTriangle, ArrowDownToLine, CheckCircle2, ClipboardList, RefreshCw, RotateCcw, Search, XCircle } from 'lucide-vue-next'
 
 const props = defineProps({
   api: { type: Object, required: true },
@@ -15,12 +15,13 @@ const message = ref({ text: '', type: 'success' })
 const filters = ref({ keyword: '', status: '', priority: '' })
 const traceCodes = ref({})
 const mappingCatalogIds = ref({})
+const reviewComment = ref('')
 
 const canOperate = computed(() => ['ADMIN', 'PHARMACIST'].includes(props.userRole))
 const metrics = computed(() => ({
-  pending: applications.value.filter(item => ['RECEIVED', 'READY'].includes(item.status)).length,
+  pending: applications.value.filter(item => ['RECEIVED', 'REVIEW_PENDING', 'READY'].includes(item.status)).length,
   urgent: applications.value.filter(item => item.priority === 'URGENT'
-    && ['RECEIVED', 'MAPPING_REQUIRED', 'READY', 'PARTIALLY_DISPENSED'].includes(item.status)).length,
+    && ['RECEIVED', 'MAPPING_REQUIRED', 'REVIEW_PENDING', 'READY', 'PARTIALLY_DISPENSED', 'RETURN_REQUIRED'].includes(item.status)).length,
   mapping: applications.value.filter(item => item.status === 'MAPPING_REQUIRED').length,
   partial: applications.value.filter(item => item.status === 'PARTIALLY_DISPENSED').length,
   callbackFailed: applications.value.filter(item => item.callbackStatus === 'FAILED').length
@@ -29,9 +30,12 @@ const metrics = computed(() => ({
 const statusLabels = {
   RECEIVED: '已接收',
   MAPPING_REQUIRED: '待匹配',
+  REVIEW_PENDING: '待审方',
+  REVIEW_REJECTED: '审方未通过',
   READY: '待发药',
   PARTIALLY_DISPENSED: '部分发药',
   DISPENSED: '已发药',
+  RETURN_REQUIRED: '待退药',
   CANCELLED: '已撤销',
   RETURNED: '已退药',
   UNMAPPED: '待匹配',
@@ -141,8 +145,32 @@ const returnDrug = async (item) => {
   }
 }
 
+const review = async (decision) => {
+  if (!selected.value) return
+  if (decision === 'REJECTED' && !reviewComment.value.trim()) {
+    return showMessage('审方不通过时必须填写原因', 'error')
+  }
+  loading.value = true
+  try {
+    const response = await props.api.post(`/api/pharmacy/applications/${selected.value.id}/review`, {
+      decision,
+      comment: reviewComment.value.trim()
+    })
+    selected.value = response.data
+    reviewComment.value = ''
+    showMessage(decision === 'APPROVED' ? '处方审核通过，可以进入调剂发药' : '处方已退回，禁止发药')
+    await loadApplications(false)
+  } catch (error) {
+    showMessage(errorText(error), 'error')
+  } finally {
+    loading.value = false
+  }
+}
+
 const progressText = (item) => `${item.dispensedQuantity || 0} / ${item.requestedQuantity} ${item.unit}`
-const isDispensable = (item) => ['PENDING', 'PARTIAL'].includes(item.status)
+const isDispensable = (item) => selected.value?.reviewStatus === 'APPROVED'
+  && selected.value?.status !== 'RETURN_REQUIRED'
+  && ['PENDING', 'PARTIAL'].includes(item.status)
 const isReturnable = (item) => ['PARTIAL', 'DISPENSED'].includes(item.status) && (item.dispensedQuantity || 0) > 0
 
 onMounted(async () => {
@@ -175,9 +203,12 @@ onMounted(async () => {
       <select v-model="filters.status" @change="loadApplications(false)">
         <option value="">全部状态</option>
         <option value="MAPPING_REQUIRED">待匹配</option>
+        <option value="REVIEW_PENDING">待审方</option>
+        <option value="REVIEW_REJECTED">审方未通过</option>
         <option value="READY">待发药</option>
         <option value="PARTIALLY_DISPENSED">部分发药</option>
         <option value="DISPENSED">已发药</option>
+        <option value="RETURN_REQUIRED">待退药</option>
         <option value="RETURNED">已退药</option>
         <option value="CANCELLED">已撤销</option>
       </select>
@@ -226,7 +257,7 @@ onMounted(async () => {
             <div>
               <span>患者</span>
               <strong>{{ selected.patientName }}</strong>
-              <small>{{ selected.patientId }} · 就诊号 {{ selected.encounterNo || '--' }}</small>
+              <small>{{ selected.patientId }} · {{ selected.patientGender || '--' }} · {{ selected.patientAge ?? '--' }}岁 · 就诊号 {{ selected.encounterNo || '--' }}</small>
             </div>
             <div>
               <span>申请单</span>
@@ -239,6 +270,22 @@ onMounted(async () => {
             </div>
           </div>
 
+          <div class="clinical-band">
+            <div><span>临床诊断</span><strong>{{ selected.diagnosis || '--' }}</strong></div>
+            <div><span>处方医师</span><strong>{{ selected.prescriberName || '--' }} · {{ selected.prescriberId || '--' }}</strong></div>
+            <div><span>过敏史</span><strong>{{ selected.allergyInfo || '--' }}</strong></div>
+          </div>
+
+          <div v-if="canOperate && selected.status === 'REVIEW_PENDING'" class="review-panel">
+            <label><span>审方意见</span><input v-model="reviewComment" placeholder="审核通过可填写注意事项；不通过必须填写原因" /></label>
+            <button class="approve-button" :disabled="loading" @click="review('APPROVED')"><CheckCircle2 />审核通过</button>
+            <button class="reject-button" :disabled="loading" @click="review('REJECTED')"><XCircle />审核不通过</button>
+          </div>
+          <div v-else-if="selected.reviewedBy" class="review-result" :data-review="selected.reviewStatus">
+            <strong>{{ selected.reviewStatus === 'APPROVED' ? '审方已通过' : '审方未通过' }}</strong>
+            <span>{{ selected.reviewedBy }} · {{ selected.reviewedAt || '--' }} · {{ selected.reviewComment || '无补充意见' }}</span>
+          </div>
+
           <div class="item-list">
             <article v-for="item in selected.items" :key="item.id" class="medicine-line">
               <div class="medicine-summary">
@@ -246,6 +293,7 @@ onMounted(async () => {
                   <span class="item-code">{{ item.hisItemNo }} · {{ item.hisDrugCode }}</span>
                   <h3>{{ item.drugName }}</h3>
                   <small>{{ item.specification || '未标注规格' }} · 本地档案：{{ item.localDrugName || '未匹配' }}</small>
+                  <small class="usage-line">{{ item.dosage }} · {{ item.frequency }} · {{ item.administrationRoute }}<template v-if="item.usageInstruction"> · {{ item.usageInstruction }}</template></small>
                 </div>
                 <div class="progress-block">
                   <span>{{ progressText(item) }}</span>
@@ -297,7 +345,7 @@ onMounted(async () => {
 .search-field, .scan-action-row label { border: 1px solid #cfd9df; background: #fff; display: flex; align-items: center; gap: 8px; padding: 0 12px; min-height: 40px; }
 input, select { min-width: 0; border: 1px solid #cfd9df; background: #fff; color: #172033; padding: 10px 12px; font: inherit; border-radius: 4px; }
 .search-field input, .scan-action-row input { border: 0; padding: 0; outline: 0; flex: 1; }
-.command-button, .dispense-button, .return-button { min-height: 40px; border: 0; padding: 0 15px; border-radius: 4px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
+.command-button, .dispense-button, .return-button, .approve-button, .reject-button { min-height: 40px; border: 0; padding: 0 15px; border-radius: 4px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
 .command-button { background: #1d6675; color: #fff; }.dispense-button { background: #0e7557; color: #fff; }.return-button { background: #fff; color: #a4372b; border: 1px solid #d8a29c; }
 .notice { padding: 10px 14px; border-left: 4px solid #2f8068; background: #eaf6f1; font-size: 13px; }.notice.error { border-color: #b42318; background: #fff0ee; color: #8e231a; }
 .workspace-grid { display: grid; grid-template-columns: minmax(280px, 0.72fr) minmax(520px, 1.5fr); min-height: 560px; border: 1px solid #d8e1e6; background: #fff; }
@@ -310,15 +358,18 @@ input, select { min-width: 0; border: 1px solid #cfd9df; background: #fff; color
 .empty-state { min-height: 180px; display: grid; place-items: center; align-content: center; gap: 10px; color: #82909a; }.empty-state svg { width: 28px; }.detail-empty { min-height: 520px; }
 .patient-band { display: grid; grid-template-columns: 1fr 1.2fr auto; gap: 24px; padding: 18px 20px; border-bottom: 1px solid #dce4e8; background: #f7fafb; }
 .patient-band > div { display: grid; gap: 4px; }.patient-band span, .patient-band small { color: #6b7a85; font-size: 11px; }.patient-band strong { font-size: 15px; }
+.clinical-band { display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 18px; padding: 13px 20px; border-bottom: 1px solid #dce4e8; }.clinical-band div { display: grid; gap: 4px; }.clinical-band span { color: #6b7a85; font-size: 11px; }.clinical-band strong { font-size: 13px; font-weight: 650; }
+.review-panel { display: grid; grid-template-columns: minmax(260px, 1fr) auto auto; gap: 10px; align-items: end; padding: 14px 20px; border-bottom: 1px solid #e1e7ea; background: #fff9e8; }.review-panel label { display: grid; gap: 5px; }.review-panel label span { font-size: 11px; color: #6b7881; }.approve-button { background: #0e7557; color: #fff; }.reject-button { background: #fff; color: #a4372b; border: 1px solid #d8a29c; }.review-panel svg { width: 17px; }.review-result { display: flex; gap: 12px; align-items: center; padding: 11px 20px; border-bottom: 1px solid #dce4e8; background: #edf8f3; font-size: 12px; }.review-result[data-review="REJECTED"] { background: #fff0ee; color: #8e231a; }.review-result span { color: #65737c; }
 .state-stack { justify-items: end; align-content: center; }.callback-state.failed { color: #b42318; }.callback-state.sent { color: #087a57; }
 .item-list { display: grid; }.medicine-line { padding: 18px 20px; border-bottom: 1px solid #e2e8eb; }.medicine-line:last-child { border-bottom: 0; }
 .medicine-summary { display: grid; grid-template-columns: minmax(220px, 1.3fr) minmax(160px, 0.7fr) auto; gap: 20px; align-items: center; }.medicine-summary h3 { margin: 4px 0; font-size: 16px; letter-spacing: 0; }.medicine-summary small, .item-code { color: #6b7881; font-size: 11px; }
 .progress-block { display: grid; gap: 5px; font-size: 12px; }.progress-track { height: 6px; background: #e5ebee; overflow: hidden; }.progress-track i { display: block; height: 100%; background: #1d7a67; }
 .status-chip { display: inline-flex; align-items: center; width: max-content; padding: 4px 8px; border-radius: 4px; background: #e7edf0; color: #4c5c66; font-size: 11px; white-space: nowrap; }.status-chip.large { padding: 6px 10px; }
 .status-chip[data-status="READY"], .status-chip[data-status="PENDING"] { background: #fff2cc; color: #785900; }.status-chip[data-status="MAPPING_REQUIRED"], .status-chip[data-status="UNMAPPED"] { background: #ffe8d7; color: #944d16; }.status-chip[data-status="PARTIALLY_DISPENSED"], .status-chip[data-status="PARTIAL"] { background: #dcecf8; color: #225e86; }.status-chip[data-status="DISPENSED"] { background: #dff3e9; color: #176349; }.status-chip[data-status="CANCELLED"], .status-chip[data-status="RETURNED"] { background: #eceff1; color: #59656d; }
+.status-chip[data-status="REVIEW_PENDING"] { background: #e8eef9; color: #38588c; }.status-chip[data-status="REVIEW_REJECTED"], .status-chip[data-status="RETURN_REQUIRED"] { background: #fde4e1; color: #982d24; }.usage-line { display: block; margin-top: 5px; color: #355f6e !important; }
 .mapping-row, .scan-action-row { margin-top: 14px; display: flex; align-items: center; gap: 10px; padding-top: 14px; border-top: 1px dashed #d6dfe4; }.mapping-row svg { width: 18px; color: #b56a20; flex: none; }.mapping-row span { font-size: 12px; }.mapping-row select { margin-left: auto; min-width: 220px; }.scan-action-row label { flex: 1; }
 .mono { font-family: Consolas, monospace; }
 button:disabled { opacity: 0.55; cursor: wait; }
 @media (max-width: 1050px) { .metric-strip { grid-template-columns: repeat(3, 1fr); }.metric-strip div { border-bottom: 1px solid #e4eaed; }.workspace-grid { grid-template-columns: 1fr; }.queue-panel { border-right: 0; border-bottom: 1px solid #d8e1e6; max-height: 320px; }.detail-panel { max-height: none; }.filter-bar { grid-template-columns: 1fr 1fr; } }
-@media (max-width: 680px) { .metric-strip { grid-template-columns: 1fr 1fr; }.filter-bar, .patient-band, .medicine-summary { grid-template-columns: 1fr; }.state-stack { justify-items: start; }.mapping-row, .scan-action-row { align-items: stretch; flex-direction: column; }.mapping-row select { margin-left: 0; min-width: 0; width: 100%; }.queue-row { grid-template-columns: 4px 1fr; }.queue-meta { grid-column: 2; justify-items: start; } }
+@media (max-width: 680px) { .metric-strip { grid-template-columns: 1fr 1fr; }.filter-bar, .patient-band, .clinical-band, .medicine-summary, .review-panel { grid-template-columns: 1fr; }.state-stack { justify-items: start; }.mapping-row, .scan-action-row { align-items: stretch; flex-direction: column; }.mapping-row select { margin-left: 0; min-width: 0; width: 100%; }.queue-row { grid-template-columns: 4px 1fr; }.queue-meta { grid-column: 2; justify-items: start; }.review-result { align-items: flex-start; flex-direction: column; } }
 </style>

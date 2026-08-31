@@ -16,6 +16,11 @@ public class DispenseRecord {
     private Integer dispenseUnits;
     private String dispenseUnit;
     private String dispenseType;
+    private Long applicationId;
+    private Long applicationItemId;
+    private Integer returnedUnits;
+    private String operationType;
+    private Long relatedRecordId;
 
     @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss", timezone = "GMT+8")
     private LocalDateTime dispenseTime;

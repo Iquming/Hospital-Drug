@@ -37,7 +37,7 @@ public class TokenAuthenticationFilter extends OncePerRequestFilter {
         String header = request.getHeader("Authorization");
         if (StringUtils.hasText(header) && header.startsWith("Bearer ")) {
             TokenService.TokenPayload payload = tokenService.parse(header.substring(7));
-            if (payload != null) {
+            if (payload != null && !tokenService.isRevoked(header.substring(7))) {
                 SysUser user = sysUserDao.findById(payload.userId());
                 if (user != null && "ENABLED".equals(user.getStatus())) {
                     CurrentUser currentUser = authService.toCurrentUser(user);

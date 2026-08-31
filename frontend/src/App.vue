@@ -274,7 +274,10 @@ const login = async () => {
     await refreshData()
     if (isAdmin.value) await loadUsers()
   } catch (e) {
-    showNotification(e.response?.data || '登录失败', 'error')
+    const message = e.response?.data?.message
+      || (typeof e.response?.data === 'string' ? e.response.data : '')
+      || (e.request ? '无法连接登录服务，请检查后端地址' : '登录失败')
+    showNotification(message, 'error')
   } finally {
     loginLoading.value = false
   }

@@ -3,6 +3,7 @@ package com.hospital.pharmacy.service;
 import com.hospital.pharmacy.constant.DispenseOperation;
 import com.hospital.pharmacy.constant.DispenseType;
 import com.hospital.pharmacy.constant.HisApplicationItemStatus;
+import com.hospital.pharmacy.constant.HisApplicationStatus;
 import com.hospital.pharmacy.constant.StockStatus;
 import com.hospital.pharmacy.dao.DrugDao;
 import com.hospital.pharmacy.dao.HisIntegrationDao;
@@ -10,6 +11,7 @@ import com.hospital.pharmacy.entity.DrugApplication;
 import com.hospital.pharmacy.entity.DrugApplicationItem;
 import com.hospital.pharmacy.entity.DrugSplitCode;
 import com.hospital.pharmacy.entity.DrugStock;
+import com.hospital.pharmacy.entity.DispenseRecord;
 import com.hospital.pharmacy.exception.BusinessException;
 import com.hospital.pharmacy.exception.ErrorCode;
 import org.springframework.stereotype.Service;
@@ -40,6 +42,7 @@ public class ApplicationDispenseService {
     public DrugApplication dispense(Long itemId, String traceCode, String operator) {
         DrugApplicationItem item = requireDispensableItem(itemId);
         DrugApplication application = requireApplication(item.getApplicationId());
+        requireApprovedApplication(application);
         DispenseUnit scanned = resolveDispenseUnit(traceCode, item, false);
 
         if (scanned.splitCode() != null) {
@@ -76,12 +79,20 @@ public class ApplicationDispenseService {
         }
         DrugApplication application = requireApplication(item.getApplicationId());
         DispenseUnit scanned = resolveDispenseUnit(traceCode, item, true);
+        DispenseRecord originalRecord = drugDao.findReturnableDispenseRecord(scanned.traceCode(),
+                application.getId(), itemId, application.getPatientId());
+        if (originalRecord == null) {
+            throw new BusinessException(ErrorCode.PRESCRIPTION_MISMATCH,
+                    "该追溯码不属于当前患者和申请明细，不能退药");
+        }
+        if (drugDao.claimReturnedUnits(originalRecord.getId(), scanned.quantity()) <= 0) {
+            throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "原发药流水的可退数量不足");
+        }
 
         if (scanned.splitCode() != null) {
-            if (drugDao.markSplitReturned(scanned.splitCode().getChildTraceCode()) <= 0) {
-                throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "拆零子码未发药或已经退回");
+            if (drugDao.markSplitReturned(scanned.splitCode().getChildTraceCode(), application.getPatientId()) <= 0) {
+                throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "拆零子码未发药、患者不一致或已经退回");
             }
-            drugDao.restoreParentMinUnits(scanned.parentTraceCode(), scanned.quantity());
         } else if (drugDao.restoreReturnedDrug(scanned.traceCode()) <= 0) {
             throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "该追溯码未发药或已经退回");
         }
@@ -92,9 +103,10 @@ public class ApplicationDispenseService {
 
         String operation = scanned.splitCode() == null
                 ? DispenseOperation.RETURNED_BY_PATIENT : DispenseOperation.SPLIT_RETURNED_BY_PATIENT;
-        drugDao.saveRecord(scanned.traceCode(), scanned.drugName(), operation + " " + application.getPatientName(),
+        drugDao.saveReturnRecord(scanned.traceCode(), scanned.drugName(), operation + " " + application.getPatientName(),
                 application.getPatientId(), scanned.parentTraceCode(), scanned.childTraceCode(),
-                scanned.quantity(), scanned.unit(), scanned.dispenseType(), application.getId(), itemId);
+                scanned.quantity(), scanned.unit(), scanned.dispenseType(), application.getId(), itemId,
+                originalRecord.getId());
         String status = hisApplicationService.refreshStatus(application.getId());
         hisCallbackService.enqueue(application.getId(), "RETURN_STATUS_CHANGED", operator);
         auditLogService.record("HIS_APPLICATION_RETURN", "drug_application_item", String.valueOf(itemId),
@@ -125,6 +137,15 @@ public class ApplicationDispenseService {
         return application;
     }
 
+    private void requireApprovedApplication(DrugApplication application) {
+        if (!"APPROVED".equals(application.getReviewStatus())) {
+            throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "处方尚未通过药师审方，不能发药");
+        }
+        if (HisApplicationStatus.RETURN_REQUIRED.equals(application.getStatus())) {
+            throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "HIS已申请撤销，请完成退药，不能继续发药");
+        }
+    }
+
     private DispenseUnit resolveDispenseUnit(String rawTraceCode, DrugApplicationItem item, boolean returning) {
         String traceCode = requireText(rawTraceCode, "追溯码不能为空");
         DrugSplitCode splitCode = drugDao.getSplitByChildTraceCode(traceCode);
@@ -132,6 +153,7 @@ public class ApplicationDispenseService {
             DrugStock parent = drugDao.getDrugByTraceCode(splitCode.getParentTraceCode());
             requireCatalogMatch(parent, item);
             requireUnitMatch(item.getUnit(), splitCode.getMinUnit());
+            requireWithinExpiry(parent, returning);
             return new DispenseUnit(traceCode, splitCode.getDrugName(), splitCode.getSplitUnits(),
                     splitCode.getMinUnit(), DispenseType.SPLIT_PACKAGE, splitCode.getParentTraceCode(),
                     splitCode.getChildTraceCode(), parent, splitCode);
@@ -142,6 +164,7 @@ public class ApplicationDispenseService {
         }
         requireCatalogMatch(stock, item);
         requireUnitMatch(item.getUnit(), safeText(stock.getPackageUnit(), "盒"));
+        requireWithinExpiry(stock, returning);
         if (!returning && stock.getQuantity() != null && stock.getQuantity() != 1) {
             throw new BusinessException(ErrorCode.STOCK_CONFLICT, "整包装追溯码必须对应一个可核销包装");
         }
@@ -163,6 +186,12 @@ public class ApplicationDispenseService {
         if (!safeText(requestedUnit, "").equals(safeText(scannedUnit, ""))) {
             throw new BusinessException(ErrorCode.PRESCRIPTION_MISMATCH,
                     "扫码包装单位与申请明细单位不一致，应发单位：" + requestedUnit);
+        }
+    }
+
+    private void requireWithinExpiry(DrugStock stock, boolean returning) {
+        if (!returning && !drugDao.isWithinExpiry(stock.getTraceCode())) {
+            throw new BusinessException(ErrorCode.STOCK_CONFLICT, "药品有效期缺失或已过期，禁止发药");
         }
     }
 

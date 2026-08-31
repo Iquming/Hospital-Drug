@@ -34,6 +34,9 @@ public class HisCallbackService {
     @Resource
     private ObjectMapper objectMapper;
 
+    @Resource
+    private HisApiKeyService hisApiKeyService;
+
     @Value("${app.his.mode:mock}")
     private String mode;
 
@@ -52,6 +55,12 @@ public class HisCallbackService {
     @Value("${app.his.callback-enabled:true}")
     private boolean callbackEnabled;
 
+    @Value("${app.his.callback-processing-timeout-seconds:120}")
+    private int processingTimeoutSeconds;
+
+    @Value("${app.his.allow-insecure-http:false}")
+    private boolean allowInsecureHttp;
+
     public String enqueue(Long applicationId, String eventType, String operator) {
         DrugApplication application = hisIntegrationDao.findApplicationById(applicationId);
         if (application == null) {
@@ -65,6 +74,9 @@ public class HisCallbackService {
         payload.put("applicationNo", application.getHisApplicationNo());
         payload.put("revision", application.getRevisionNo());
         payload.put("status", application.getStatus());
+        payload.put("reviewStatus", application.getReviewStatus());
+        payload.put("reviewedBy", application.getReviewedBy());
+        payload.put("reviewedAt", application.getReviewedAt());
         payload.put("patientId", application.getPatientId());
         payload.put("operator", operator);
         payload.put("eventTime", LocalDateTime.now());
@@ -101,6 +113,8 @@ public class HisCallbackService {
         if (!callbackEnabled) {
             return;
         }
+        hisIntegrationDao.recoverStaleCallbacks(
+                LocalDateTime.now().minusSeconds(Math.max(processingTimeoutSeconds, 30)));
         for (HisCallbackEvent event : hisIntegrationDao.findDueCallbacks(20)) {
             if (hisIntegrationDao.markCallbackProcessing(event.getId()) <= 0) {
                 continue;
@@ -125,13 +139,27 @@ public class HisCallbackService {
         if (!StringUtils.hasText(callbackUrl)) {
             throw new IllegalStateException("未配置HIS状态回传地址");
         }
+        URI target = URI.create(callbackUrl);
+        if (!allowInsecureHttp && !"https".equalsIgnoreCase(target.getScheme())) {
+            throw new IllegalStateException("真实HIS回传地址必须使用HTTPS");
+        }
+        String timestamp = String.valueOf(java.time.Instant.now().getEpochSecond());
+        String nonce = event.getEventId();
+        String requestTarget = StringUtils.hasText(target.getRawPath()) ? target.getRawPath() : "/";
+        if (StringUtils.hasText(target.getRawQuery())) {
+            requestTarget += "?" + target.getRawQuery();
+        }
+        String signature = hisApiKeyService.signRequest(timestamp, nonce, requestTarget, event.getPayloadJson());
         HttpClient client = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofMillis(Math.max(connectTimeoutMs, 500)))
                 .build();
-        HttpRequest request = HttpRequest.newBuilder(URI.create(callbackUrl))
+        HttpRequest request = HttpRequest.newBuilder(target)
                 .timeout(Duration.ofMillis(Math.max(readTimeoutMs, 1000)))
                 .header("Content-Type", "application/json")
                 .header("X-HIS-Key", apiKey)
+                .header("X-HIS-Timestamp", timestamp)
+                .header("X-HIS-Nonce", nonce)
+                .header("X-HIS-Signature", signature)
                 .POST(HttpRequest.BodyPublishers.ofString(event.getPayloadJson()))
                 .build();
         HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());

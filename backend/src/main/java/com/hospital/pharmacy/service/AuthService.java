@@ -27,18 +27,27 @@ public class AuthService {
     @Resource
     private AuditLogService auditLogService;
 
-    public Map<String, Object> login(String username, String password) {
+    @Resource
+    private LoginGuardService loginGuardService;
+
+    public Map<String, Object> login(String username, String password, String clientAddress) {
         String normalizedUsername = requireText(username, "用户名不能为空");
         String normalizedPassword = requireText(password, "密码不能为空");
+        loginGuardService.requireAllowed(normalizedUsername, clientAddress);
 
         SysUser user = sysUserDao.findByUsername(normalizedUsername);
         if (user == null || !"ENABLED".equals(user.getStatus())) {
+            loginGuardService.recordFailure(normalizedUsername, clientAddress);
+            auditLogService.record("LOGIN_FAILED", "sys_user", normalizedUsername, null, null, "FAILED", "登录失败");
             throw new IllegalArgumentException("用户名或密码错误");
         }
         if (!passwordEncoder.matches(normalizedPassword, user.getPasswordHash())) {
+            loginGuardService.recordFailure(normalizedUsername, clientAddress);
+            auditLogService.record("LOGIN_FAILED", "sys_user", normalizedUsername, null, null, "FAILED", "登录失败");
             throw new IllegalArgumentException("用户名或密码错误");
         }
 
+        loginGuardService.clear(normalizedUsername, clientAddress);
         sysUserDao.updateLastLogin(user.getId());
         CurrentUser currentUser = toCurrentUser(user);
         auditLogService.recordUser(user.getId(), user.getDisplayName(), user.getRole(), "LOGIN",

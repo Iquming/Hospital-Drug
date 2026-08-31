@@ -74,6 +74,7 @@ public class DrugDao {
                 "WHERE trace_code = ? " +
                 "AND status = ? " +
                 "AND quantity = 1 " +
+                "AND expire_date IS NOT NULL AND expire_date >= CURDATE() " +
                 "AND (COALESCE(stock_type, ?) <> ? " +
                 "OR COALESCE(remaining_min_units, 0) >= COALESCE(min_units_per_package, 1))";
         return jdbcTemplate.update(sql, StockStatus.DISPENSED, traceCode, StockStatus.IN_STOCK, StockType.WHOLE, StockType.SPLIT_PARENT);
@@ -126,6 +127,32 @@ public class DrugDao {
                 dispenseUnits, dispenseUnit, dispenseType, applicationId, applicationItemId);
     }
 
+    public DispenseRecord findReturnableDispenseRecord(String traceCode, Long applicationId,
+                                                        Long applicationItemId, String patientId) {
+        String sql = "SELECT * FROM dispense_record WHERE trace_code = ? AND application_id = ? " +
+                "AND application_item_id = ? AND patient_id = ? AND COALESCE(operation_type, 'DISPENSE') = 'DISPENSE' " +
+                "AND COALESCE(dispense_units, 0) > COALESCE(returned_units, 0) ORDER BY id DESC LIMIT 1";
+        List<DispenseRecord> rows = jdbcTemplate.query(sql, new BeanPropertyRowMapper<>(DispenseRecord.class),
+                traceCode, applicationId, applicationItemId, patientId);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    public int claimReturnedUnits(Long recordId, int units) {
+        return jdbcTemplate.update("UPDATE dispense_record SET returned_units = returned_units + ? " +
+                        "WHERE id = ? AND dispense_units - returned_units >= ?",
+                units, recordId, units);
+    }
+
+    public void saveReturnRecord(String traceCode, String drugName, String patientName, String patientId,
+                                 String parentTraceCode, String childTraceCode, Integer units, String unit,
+                                 String dispenseType, Long applicationId, Long applicationItemId, Long relatedRecordId) {
+        String sql = "INSERT INTO dispense_record (trace_code, drug_name, patient_name, patient_id, dispense_time, " +
+                "parent_trace_code, child_trace_code, dispense_units, dispense_unit, dispense_type, application_id, " +
+                "application_item_id, operation_type, related_record_id) VALUES (?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, 'RETURN', ?)";
+        jdbcTemplate.update(sql, traceCode, drugName, patientName, patientId, parentTraceCode, childTraceCode,
+                units, unit, dispenseType, applicationId, applicationItemId, relatedRecordId);
+    }
+
     // 6. 获取所有记录
     public List<DispenseRecord> getAllRecords() {
         String sql = "SELECT * FROM dispense_record ORDER BY dispense_time DESC";
@@ -175,7 +202,15 @@ public class DrugDao {
         String sql = "UPDATE drug_stock SET status = ?, quantity = 1, remaining_min_units = COALESCE(min_units_per_package, 1), " +
                 "version = version + 1, update_time = NOW() " +
                 "WHERE trace_code = ? AND status = ?";
-        return jdbcTemplate.update(sql, StockStatus.IN_STOCK, traceCode, StockStatus.DISPENSED);
+        return jdbcTemplate.update(sql, StockStatus.LOCKED, traceCode, StockStatus.DISPENSED);
+    }
+
+    public boolean isWithinExpiry(String traceCode) {
+        Integer count = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM drug_stock WHERE trace_code = ? " +
+                        "AND expire_date IS NOT NULL AND expire_date >= CURDATE()",
+                Integer.class, traceCode);
+        return count != null && count > 0;
     }
 
     public int markPrescriptionReturned(Long prescriptionId) {
@@ -226,16 +261,19 @@ public class DrugDao {
     }
 
     public int markSplitDispensed(String childTraceCode, String patientId) {
-        String sql = "UPDATE drug_split_code SET status = ?, remaining_units = 0, version = version + 1, " +
-                "dispensed_to_patient_id = ?, dispensed_time = NOW(), update_time = NOW() " +
-                "WHERE child_trace_code = ? AND status = ?";
-        return jdbcTemplate.update(sql, SplitCodeStatus.DISPENSED, patientId, childTraceCode, SplitCodeStatus.AVAILABLE);
+        String sql = "UPDATE drug_split_code c JOIN drug_stock s ON s.trace_code = c.parent_trace_code " +
+                "SET c.status = ?, c.remaining_units = 0, c.version = c.version + 1, " +
+                "c.dispensed_to_patient_id = ?, c.dispensed_time = NOW(), c.update_time = NOW() " +
+                "WHERE c.child_trace_code = ? AND c.status = ? AND s.status = ? " +
+                "AND s.expire_date IS NOT NULL AND s.expire_date >= CURDATE()";
+        return jdbcTemplate.update(sql, SplitCodeStatus.DISPENSED, patientId, childTraceCode,
+                SplitCodeStatus.AVAILABLE, StockStatus.IN_STOCK);
     }
 
-    public int markSplitReturned(String childTraceCode) {
+    public int markSplitReturned(String childTraceCode, String patientId) {
         String sql = "UPDATE drug_split_code SET status = ?, remaining_units = split_units, version = version + 1, update_time = NOW() " +
-                "WHERE child_trace_code = ? AND status = ?";
-        return jdbcTemplate.update(sql, SplitCodeStatus.RETURNED, childTraceCode, SplitCodeStatus.DISPENSED);
+                "WHERE child_trace_code = ? AND status = ? AND dispensed_to_patient_id = ?";
+        return jdbcTemplate.update(sql, SplitCodeStatus.RETURNED, childTraceCode, SplitCodeStatus.DISPENSED, patientId);
     }
 
     // ✅ 新增：查询近效期药品（默认90天内到期且库存>0，按效期升序）
@@ -251,10 +289,11 @@ public class DrugDao {
 
     public List<DrugStock> findFifoCandidates(String drugName, int limit) {
         String sql = "SELECT * FROM drug_stock " +
-                "WHERE drug_name = ? AND quantity > 0 " +
+                "WHERE drug_name = ? AND quantity > 0 AND status = ? " +
+                "AND expire_date IS NOT NULL AND expire_date >= CURDATE() " +
                 "ORDER BY expire_date IS NULL ASC, expire_date ASC, create_time ASC " +
                 "LIMIT ?";
-        return jdbcTemplate.query(sql, new BeanPropertyRowMapper<>(DrugStock.class), drugName, limit);
+        return jdbcTemplate.query(sql, new BeanPropertyRowMapper<>(DrugStock.class), drugName, StockStatus.IN_STOCK, limit);
     }
 
     public List<DrugSplitCode> findAvailableSplitCodes(int limit) {

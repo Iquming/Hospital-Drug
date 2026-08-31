@@ -2,12 +2,19 @@ package com.hospital.pharmacy.security;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.jdbc.core.JdbcTemplate;
+
+import jakarta.annotation.Resource;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.Base64;
+import java.security.MessageDigest;
+import java.util.HexFormat;
 
 @Service
 public class TokenService {
@@ -19,6 +26,9 @@ public class TokenService {
 
     @Value("${app.security.token-expire-hours}")
     private long expireHours;
+
+    @Resource
+    private JdbcTemplate jdbcTemplate;
 
     public String generate(CurrentUser user) {
         long expiresAt = Instant.now().plusSeconds(expireHours * 3600).getEpochSecond();
@@ -54,6 +64,35 @@ public class TokenService {
             return new TokenPayload(Long.parseLong(values[0]), values[1], expiresAt);
         } catch (NumberFormatException e) {
             return null;
+        }
+    }
+
+    public boolean isRevoked(String token) {
+        Integer count = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM revoked_token WHERE token_hash = ? AND expires_at > NOW()",
+                Integer.class, tokenHash(token));
+        return count != null && count > 0;
+    }
+
+    public void revoke(String token) {
+        TokenPayload payload = parse(token);
+        if (payload == null) {
+            return;
+        }
+        LocalDateTime expiresAt = LocalDateTime.ofInstant(
+                Instant.ofEpochSecond(payload.expiresAt()), ZoneId.systemDefault());
+        jdbcTemplate.update("INSERT INTO revoked_token (token_hash, expires_at, revoked_at) VALUES (?, ?, NOW()) " +
+                        "ON DUPLICATE KEY UPDATE expires_at = VALUES(expires_at), revoked_at = NOW()",
+                tokenHash(token), expiresAt);
+        jdbcTemplate.update("DELETE FROM revoked_token WHERE expires_at <= NOW()");
+    }
+
+    private String tokenHash(String token) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(token.getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception e) {
+            throw new IllegalStateException("Token摘要生成失败", e);
         }
     }
 

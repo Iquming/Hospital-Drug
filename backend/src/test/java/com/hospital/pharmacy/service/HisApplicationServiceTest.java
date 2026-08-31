@@ -57,10 +57,39 @@ class HisApplicationServiceTest {
         assertEquals(HisApplicationStatus.RETURNED, service.refreshStatus(1L));
     }
 
+    @Test
+    void requiresReviewBeforeApplicationBecomesReady() {
+        DrugApplication application = new DrugApplication();
+        application.setId(1L);
+        application.setStatus(HisApplicationStatus.RECEIVED);
+        application.setReviewStatus("PENDING");
+        when(hisIntegrationDao.findApplicationById(1L)).thenReturn(application);
+        when(hisIntegrationDao.applicationTotals(1L)).thenReturn(totals(3, 0, 0, 0));
+
+        assertEquals(HisApplicationStatus.REVIEW_PENDING, service.refreshStatus(1L));
+    }
+
+    @Test
+    void marksPartiallyIssuedThenFullyReturnedAsReturned() {
+        stubApplication(HisApplicationStatus.PARTIALLY_DISPENSED);
+        when(hisIntegrationDao.applicationTotals(1L)).thenReturn(totals(10, 0, 3, 0));
+
+        assertEquals(HisApplicationStatus.RETURNED, service.refreshStatus(1L));
+    }
+
+    @Test
+    void keepsReturnRequiredWhileDispensedQuantityRemains() {
+        stubApplication(HisApplicationStatus.RETURN_REQUIRED);
+        when(hisIntegrationDao.applicationTotals(1L)).thenReturn(totals(10, 2, 1, 0));
+
+        assertEquals(HisApplicationStatus.RETURN_REQUIRED, service.refreshStatus(1L));
+    }
+
     private void stubApplication(String status) {
         DrugApplication application = new DrugApplication();
         application.setId(1L);
         application.setStatus(status);
+        application.setReviewStatus("APPROVED");
         when(hisIntegrationDao.findApplicationById(1L)).thenReturn(application);
     }
 

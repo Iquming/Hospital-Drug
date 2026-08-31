@@ -40,4 +40,10 @@ public class IdempotentRequestDao {
         String sql = "UPDATE idempotent_request SET status = 'FAILED', response_body = ?, update_time = NOW() WHERE request_id = ?";
         jdbcTemplate.update(sql, responseBody, requestId);
     }
+
+    public boolean restartFailed(String requestId, String requestHash) {
+        String sql = "UPDATE idempotent_request SET status = 'PROCESSING', response_body = NULL, update_time = NOW() " +
+                "WHERE request_id = ? AND request_hash = ? AND status = 'FAILED'";
+        return jdbcTemplate.update(sql, requestId, requestHash) > 0;
+    }
 }
