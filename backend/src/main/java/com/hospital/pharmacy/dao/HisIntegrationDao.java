@@ -159,14 +159,16 @@ public class HisIntegrationDao {
     }
 
     public List<DrugApplicationItem> findItems(Long applicationId) {
-        String sql = "SELECT i.*, c.drug_name AS local_drug_name FROM drug_application_item i " +
+        String sql = "SELECT i.*, c.drug_name AS local_drug_name, " +
+                "COALESCE(c.control_category, 'GENERAL') AS control_category FROM drug_application_item i " +
                 "LEFT JOIN drug_catalog c ON c.id = i.local_catalog_id " +
                 "WHERE i.application_id = ? ORDER BY i.id";
         return jdbcTemplate.query(sql, new BeanPropertyRowMapper<>(DrugApplicationItem.class), applicationId);
     }
 
     public DrugApplicationItem findItem(Long itemId) {
-        String sql = "SELECT i.*, c.drug_name AS local_drug_name FROM drug_application_item i " +
+        String sql = "SELECT i.*, c.drug_name AS local_drug_name, " +
+                "COALESCE(c.control_category, 'GENERAL') AS control_category FROM drug_application_item i " +
                 "LEFT JOIN drug_catalog c ON c.id = i.local_catalog_id WHERE i.id = ? LIMIT 1";
         List<DrugApplicationItem> rows = jdbcTemplate.query(sql,
                 new BeanPropertyRowMapper<>(DrugApplicationItem.class), itemId);
@@ -227,6 +229,32 @@ public class HisIntegrationDao {
                 "APPROVED".equals(reviewStatus) ? "READY" : "REVIEW_REJECTED", applicationId);
     }
 
+    public int autoApproveGeneralReview(Long applicationId, String comment, String reviewer) {
+        return jdbcTemplate.update("UPDATE drug_application SET review_status = 'APPROVED', review_comment = ?, " +
+                        "reviewed_by = ?, reviewed_at = NOW(), update_time = NOW() WHERE id = ? " +
+                        "AND review_status = 'PENDING' " +
+                        "AND status NOT IN ('PARTIALLY_DISPENSED', 'DISPENSED', 'RETURN_REQUIRED', 'RETURNED', 'CANCELLED')",
+                comment, reviewer, applicationId);
+    }
+
+    public int resetSystemReviewForSpecialDrug(Long applicationId, String comment, String reviewer) {
+        return jdbcTemplate.update("UPDATE drug_application SET review_status = 'PENDING', review_comment = ?, " +
+                        "reviewed_by = NULL, reviewed_at = NULL, update_time = NOW() WHERE id = ? " +
+                        "AND review_status = 'APPROVED' AND reviewed_by = ? " +
+                        "AND status NOT IN ('PARTIALLY_DISPENSED', 'DISPENSED', 'RETURN_REQUIRED', 'RETURNED', 'CANCELLED')",
+                comment, applicationId, reviewer);
+    }
+
+    public List<Long> findUnstartedApplicationIdsByCatalog(Long catalogId) {
+        String sql = "SELECT DISTINCT i.application_id FROM drug_application_item i " +
+                "JOIN drug_application a ON a.id = i.application_id " +
+                "WHERE i.local_catalog_id = ? " +
+                "AND a.status IN ('MAPPING_REQUIRED', 'REVIEW_PENDING', 'READY') " +
+                "AND NOT EXISTS (SELECT 1 FROM drug_application_item issued " +
+                "WHERE issued.application_id = a.id AND (issued.dispensed_quantity > 0 OR issued.returned_quantity > 0))";
+        return jdbcTemplate.query(sql, (rs, rowNum) -> rs.getLong(1), catalogId);
+    }
+
     public int cancelApplication(Long applicationId, String reason) {
         jdbcTemplate.update("UPDATE drug_application_item SET status = 'CANCELLED', update_time = NOW() " +
                 "WHERE application_id = ? AND dispensed_quantity = 0", applicationId);
@@ -254,11 +282,14 @@ public class HisIntegrationDao {
 
     public Map<String, Object> applicationTotals(Long applicationId) {
         return jdbcTemplate.queryForMap("SELECT COUNT(*) AS item_count, " +
-                        "COALESCE(SUM(requested_quantity), 0) AS requested_quantity, " +
-                        "COALESCE(SUM(dispensed_quantity), 0) AS dispensed_quantity, " +
-                        "COALESCE(SUM(returned_quantity), 0) AS returned_quantity, " +
-                        "COALESCE(SUM(CASE WHEN local_catalog_id IS NULL THEN 1 ELSE 0 END), 0) AS unmapped_count " +
-                        "FROM drug_application_item WHERE application_id = ?",
+                        "COALESCE(SUM(i.requested_quantity), 0) AS requested_quantity, " +
+                        "COALESCE(SUM(i.dispensed_quantity), 0) AS dispensed_quantity, " +
+                        "COALESCE(SUM(i.returned_quantity), 0) AS returned_quantity, " +
+                        "COALESCE(SUM(CASE WHEN i.local_catalog_id IS NULL THEN 1 ELSE 0 END), 0) AS unmapped_count, " +
+                        "COALESCE(SUM(CASE WHEN i.local_catalog_id IS NOT NULL " +
+                        "AND COALESCE(c.control_category, 'GENERAL') <> 'GENERAL' THEN 1 ELSE 0 END), 0) AS controlled_count " +
+                        "FROM drug_application_item i LEFT JOIN drug_catalog c ON c.id = i.local_catalog_id " +
+                        "WHERE i.application_id = ?",
                 applicationId);
     }
 
@@ -316,7 +347,11 @@ public class HisIntegrationDao {
     }
 
     private String applicationSelect() {
-        return "SELECT a.*, (SELECT e.status FROM his_callback_event e WHERE e.application_id = a.id " +
+        return "SELECT a.*, EXISTS (SELECT 1 FROM drug_application_item review_item " +
+                "JOIN drug_catalog review_catalog ON review_catalog.id = review_item.local_catalog_id " +
+                "WHERE review_item.application_id = a.id " +
+                "AND COALESCE(review_catalog.control_category, 'GENERAL') <> 'GENERAL') AS special_review_required, " +
+                "(SELECT e.status FROM his_callback_event e WHERE e.application_id = a.id " +
                 "ORDER BY e.id DESC LIMIT 1) AS callback_status FROM drug_application a";
     }
 

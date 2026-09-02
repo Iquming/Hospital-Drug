@@ -29,6 +29,10 @@ import java.util.Set;
 @Service
 public class HisApplicationService {
 
+    private static final String SYSTEM_REVIEWER = "系统规则";
+    private static final String GENERAL_REVIEW_COMMENT = "普通药品处方已完成通用审核，无需特殊药品人工复核";
+    private static final String SPECIAL_REVIEW_PENDING_COMMENT = "检测到特殊管理药品，等待人工复核";
+
     @Resource
     private HisIntegrationDao hisIntegrationDao;
 
@@ -187,14 +191,23 @@ public class HisApplicationService {
         if (HisApplicationStatus.MAPPING_REQUIRED.equals(application.getStatus())) {
             throw new BusinessException(ErrorCode.HIS_MAPPING_REQUIRED, "存在未匹配药品，不能完成审方");
         }
-        String comment = textOr(request.comment(), "APPROVED".equals(decision) ? "处方审核通过" : "处方审核不通过");
+        if (!Boolean.TRUE.equals(application.getSpecialReviewRequired())) {
+            throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION,
+                    "普通药品无需特殊药品人工复核；处方不合理问题应在通用处方审核环节处理");
+        }
+        if (!HisApplicationStatus.REVIEW_PENDING.equals(application.getStatus())) {
+            throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "当前申请单不在特殊药品待复核状态");
+        }
+        String comment = textOr(request.comment(),
+                "APPROVED".equals(decision) ? "特殊药品人工复核通过" : "特殊药品人工复核不通过");
         if (hisIntegrationDao.reviewApplication(applicationId, decision, comment, reviewer) <= 0) {
-            throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "当前申请单状态不允许审方");
+            throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "当前申请单状态不允许特殊药品复核");
         }
         String status = refreshStatus(applicationId);
-        hisCallbackService.enqueue(applicationId, "PRESCRIPTION_REVIEWED", reviewer);
-        auditLogService.record("PRESCRIPTION_REVIEW", "drug_application", String.valueOf(applicationId),
-                application.getReviewStatus(), decision, "SUCCESS", comment + " 操作人:" + reviewer);
+        hisCallbackService.enqueue(applicationId, "CONTROLLED_DRUG_REVIEWED", reviewer);
+        auditLogService.record("CONTROLLED_DRUG_REVIEW", "drug_application", String.valueOf(applicationId),
+                application.getReviewStatus(), decision, "SUCCESS",
+                comment + " 申请单状态:" + status + " 操作人:" + reviewer);
         return detail(applicationId);
     }
 
@@ -226,6 +239,27 @@ public class HisApplicationService {
                 null, String.valueOf(request.localCatalogId()), "SUCCESS", operator);
     }
 
+    @Transactional(rollbackFor = Exception.class)
+    public void refreshUnstartedApplicationsForCatalog(Long catalogId, String operator) {
+        for (Long applicationId : hisIntegrationDao.findUnstartedApplicationIdsByCatalog(catalogId)) {
+            DrugApplication before = hisIntegrationDao.findApplicationById(applicationId);
+            if (before == null) {
+                continue;
+            }
+            String afterStatus = refreshStatus(applicationId);
+            DrugApplication after = hisIntegrationDao.findApplicationById(applicationId);
+            boolean statusChanged = !before.getStatus().equals(afterStatus);
+            boolean reviewChanged = after != null && !java.util.Objects.equals(
+                    before.getReviewStatus(), after.getReviewStatus());
+            if (statusChanged || reviewChanged) {
+                hisCallbackService.enqueue(applicationId, "DRUG_CONTROL_CATEGORY_CHANGED", operator);
+                auditLogService.record("DRUG_CONTROL_CATEGORY_RECALCULATED", "drug_application",
+                        String.valueOf(applicationId), before.getStatus(), afterStatus, "SUCCESS",
+                        "药品特殊管理属性变更，系统已重新计算未发药申请 操作人:" + operator);
+            }
+        }
+    }
+
     public String refreshStatus(Long applicationId) {
         DrugApplication application = hisIntegrationDao.findApplicationById(applicationId);
         if (application == null) {
@@ -239,6 +273,28 @@ public class HisApplicationService {
         int dispensed = number(totals.get("dispensed_quantity"));
         int returned = number(totals.get("returned_quantity"));
         int unmapped = number(totals.get("unmapped_count"));
+        int controlled = number(totals.get("controlled_count"));
+
+        if (unmapped == 0 && dispensed == 0 && returned == 0) {
+            if (controlled == 0 && "PENDING".equals(application.getReviewStatus())) {
+                if (hisIntegrationDao.autoApproveGeneralReview(
+                        applicationId, GENERAL_REVIEW_COMMENT, SYSTEM_REVIEWER) > 0) {
+                    application.setReviewStatus("APPROVED");
+                    application.setReviewComment(GENERAL_REVIEW_COMMENT);
+                    application.setReviewedBy(SYSTEM_REVIEWER);
+                }
+            } else if (controlled > 0
+                    && "APPROVED".equals(application.getReviewStatus())
+                    && SYSTEM_REVIEWER.equals(application.getReviewedBy())) {
+                if (hisIntegrationDao.resetSystemReviewForSpecialDrug(
+                        applicationId, SPECIAL_REVIEW_PENDING_COMMENT, SYSTEM_REVIEWER) > 0) {
+                    application.setReviewStatus("PENDING");
+                    application.setReviewComment(SPECIAL_REVIEW_PENDING_COMMENT);
+                    application.setReviewedBy(null);
+                }
+            }
+        }
+
         String status;
         if (HisApplicationStatus.RETURN_REQUIRED.equals(application.getStatus()) && dispensed > 0) {
             status = HisApplicationStatus.RETURN_REQUIRED;

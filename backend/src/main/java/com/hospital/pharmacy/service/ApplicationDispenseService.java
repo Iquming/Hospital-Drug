@@ -139,7 +139,10 @@ public class ApplicationDispenseService {
 
     private void requireApprovedApplication(DrugApplication application) {
         if (!"APPROVED".equals(application.getReviewStatus())) {
-            throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "处方尚未通过药师审方，不能发药");
+            String message = Boolean.TRUE.equals(application.getSpecialReviewRequired())
+                    ? "特殊管理药品尚未完成人工复核，不能发药"
+                    : "处方尚未通过通用审核，不能发药";
+            throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, message);
         }
         if (HisApplicationStatus.RETURN_REQUIRED.equals(application.getStatus())) {
             throw new BusinessException(ErrorCode.INVALID_STATE_TRANSITION, "HIS已申请撤销，请完成退药，不能继续发药");

@@ -1,9 +1,11 @@
 package com.hospital.pharmacy.service;
 
+import com.hospital.pharmacy.constant.DrugControlCategory;
 import com.hospital.pharmacy.dao.DrugCatalogDao;
 import com.hospital.pharmacy.entity.DrugCatalog;
 import com.hospital.pharmacy.entity.DrugStock;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import jakarta.annotation.Resource;
@@ -18,6 +20,9 @@ public class DrugCatalogService {
     @Resource
     private AuditLogService auditLogService;
 
+    @Resource
+    private HisApplicationService hisApplicationService;
+
     public List<DrugCatalog> list() {
         return drugCatalogDao.findAll();
     }
@@ -28,11 +33,13 @@ public class DrugCatalogService {
         auditLogService.record("DRUG_CATALOG_CREATE", "drug_catalog", catalog.getDrugName(), null, catalog.toString(), "SUCCESS", "新增药品档案");
     }
 
+    @Transactional(rollbackFor = Exception.class)
     public void update(Long id, DrugCatalog catalog) {
         validate(catalog);
         if (drugCatalogDao.update(id, catalog) <= 0) {
             throw new IllegalArgumentException("药品档案不存在");
         }
+        hisApplicationService.refreshUnstartedApplicationsForCatalog(id, "药品档案维护");
         auditLogService.record("DRUG_CATALOG_UPDATE", "drug_catalog", String.valueOf(id), null, catalog.toString(), "SUCCESS", "更新药品档案");
     }
 
@@ -44,14 +51,25 @@ public class DrugCatalogService {
     }
 
     public void applyCatalogDefaults(DrugStock drug) {
-        if (drug == null || !StringUtils.hasText(drug.getDrugName())) {
+        if (drug == null) {
             return;
         }
-        DrugCatalog catalog = drugCatalogDao.findByName(drug.getDrugName().trim());
+        DrugCatalog catalog;
+        if (drug.getCatalogId() != null) {
+            catalog = drugCatalogDao.findById(drug.getCatalogId());
+            if (catalog == null) {
+                throw new IllegalArgumentException("所选药品档案不存在或已停用");
+            }
+        } else if (StringUtils.hasText(drug.getDrugName())) {
+            catalog = drugCatalogDao.findByName(drug.getDrugName().trim());
+        } else {
+            return;
+        }
         if (catalog == null) {
             return;
         }
         drug.setCatalogId(catalog.getId());
+        drug.setDrugName(catalog.getDrugName());
         drug.setIsSplitAllowed(catalog.getIsSplitAllowed());
         drug.setPackageUnit(catalog.getPackageUnit());
         drug.setMinUnit(catalog.getMinUnit());
@@ -63,6 +81,13 @@ public class DrugCatalogService {
             throw new IllegalArgumentException("药品名称不能为空");
         }
         catalog.setDrugName(catalog.getDrugName().trim());
+        String controlCategory = StringUtils.hasText(catalog.getControlCategory())
+                ? catalog.getControlCategory().trim().toUpperCase()
+                : DrugControlCategory.GENERAL;
+        if (!DrugControlCategory.isSupported(controlCategory)) {
+            throw new IllegalArgumentException("特殊管理属性不合法");
+        }
+        catalog.setControlCategory(controlCategory);
         if (!StringUtils.hasText(catalog.getStatus())) {
             catalog.setStatus("ENABLED");
         }

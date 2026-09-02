@@ -64,7 +64,8 @@ public class DrugDao {
 
     // 2. 查询所有库存
     public List<DrugStock> findAll() {
-        String sql = "SELECT * FROM drug_stock ORDER BY id DESC";
+        String sql = "SELECT s.*, COALESCE(c.control_category, 'GENERAL') AS control_category " +
+                "FROM drug_stock s LEFT JOIN drug_catalog c ON c.id = s.catalog_id ORDER BY s.id DESC";
         return jdbcTemplate.query(sql, new BeanPropertyRowMapper<>(DrugStock.class));
     }
 
@@ -83,7 +84,9 @@ public class DrugDao {
     // 4. 查单个药 (根据追溯码)
     public DrugStock getDrugByTraceCode(String traceCode) {
         try {
-            String sql = "SELECT * FROM drug_stock WHERE trace_code = ? LIMIT 1";
+            String sql = "SELECT s.*, COALESCE(c.control_category, 'GENERAL') AS control_category " +
+                    "FROM drug_stock s LEFT JOIN drug_catalog c ON c.id = s.catalog_id " +
+                    "WHERE s.trace_code = ? LIMIT 1";
             return jdbcTemplate.queryForObject(sql, new BeanPropertyRowMapper<>(DrugStock.class), traceCode);
         } catch (EmptyResultDataAccessException e) {
             return null;

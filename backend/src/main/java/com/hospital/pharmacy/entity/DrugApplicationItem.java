@@ -13,6 +13,7 @@ public class DrugApplicationItem {
     private String hisDrugCode;
     private Long localCatalogId;
     private String localDrugName;
+    private String controlCategory;
     private String drugName;
     private String specification;
     private String dosage;

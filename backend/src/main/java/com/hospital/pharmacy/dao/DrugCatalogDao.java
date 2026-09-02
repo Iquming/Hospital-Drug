@@ -39,14 +39,15 @@ public class DrugCatalogDao {
     }
 
     public void create(DrugCatalog catalog) {
-        String sql = "INSERT INTO drug_catalog (drug_name, specification, dosage_form, manufacturer, is_split_allowed, " +
+        String sql = "INSERT INTO drug_catalog (drug_name, specification, dosage_form, manufacturer, control_category, is_split_allowed, " +
                 "package_unit, min_unit, min_units_per_package, low_stock_threshold, status, create_time, update_time) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())";
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())";
         jdbcTemplate.update(sql,
                 catalog.getDrugName(),
                 catalog.getSpecification(),
                 catalog.getDosageForm(),
                 catalog.getManufacturer(),
+                catalog.getControlCategory(),
                 Boolean.TRUE.equals(catalog.getIsSplitAllowed()) ? 1 : 0,
                 safe(catalog.getPackageUnit(), "盒"),
                 safe(catalog.getMinUnit(), "盒"),
@@ -57,13 +58,14 @@ public class DrugCatalogDao {
 
     public int update(Long id, DrugCatalog catalog) {
         String sql = "UPDATE drug_catalog SET drug_name = ?, specification = ?, dosage_form = ?, manufacturer = ?, " +
-                "is_split_allowed = ?, package_unit = ?, min_unit = ?, min_units_per_package = ?, " +
+                "control_category = ?, is_split_allowed = ?, package_unit = ?, min_unit = ?, min_units_per_package = ?, " +
                 "low_stock_threshold = ?, status = ?, update_time = NOW() WHERE id = ?";
         return jdbcTemplate.update(sql,
                 catalog.getDrugName(),
                 catalog.getSpecification(),
                 catalog.getDosageForm(),
                 catalog.getManufacturer(),
+                catalog.getControlCategory(),
                 Boolean.TRUE.equals(catalog.getIsSplitAllowed()) ? 1 : 0,
                 safe(catalog.getPackageUnit(), "盒"),
                 safe(catalog.getMinUnit(), "盒"),

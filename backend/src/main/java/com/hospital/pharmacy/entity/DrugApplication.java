@@ -28,6 +28,7 @@ public class DrugApplication {
     private String reviewStatus;
     private String reviewComment;
     private String reviewedBy;
+    private Boolean specialReviewRequired;
     private String cancelReason;
     private String callbackStatus;
     private List<DrugApplicationItem> items;

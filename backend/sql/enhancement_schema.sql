@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS drug_catalog (
   specification VARCHAR(100) NULL,
   dosage_form VARCHAR(60) NULL,
   manufacturer VARCHAR(120) NULL,
+  control_category VARCHAR(30) NOT NULL DEFAULT 'GENERAL',
   is_split_allowed TINYINT(1) NOT NULL DEFAULT 0,
   package_unit VARCHAR(20) NOT NULL DEFAULT '盒',
   min_unit VARCHAR(20) NOT NULL DEFAULT '盒',

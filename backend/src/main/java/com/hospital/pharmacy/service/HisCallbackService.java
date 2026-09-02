@@ -75,6 +75,7 @@ public class HisCallbackService {
         payload.put("revision", application.getRevisionNo());
         payload.put("status", application.getStatus());
         payload.put("reviewStatus", application.getReviewStatus());
+        payload.put("specialReviewRequired", application.getSpecialReviewRequired());
         payload.put("reviewedBy", application.getReviewedBy());
         payload.put("reviewedAt", application.getReviewedAt());
         payload.put("patientId", application.getPatientId());
@@ -87,6 +88,7 @@ public class HisCallbackService {
                 "dispensedQuantity", item.getDispensedQuantity(),
                 "returnedQuantity", item.getReturnedQuantity(),
                 "unit", item.getUnit(),
+                "controlCategory", item.getControlCategory(),
                 "status", item.getStatus()
         )).toList());
         try {

@@ -7,6 +7,7 @@ public class DrugStock {
     private Long id;
     private Long catalogId;
     private String drugName;
+    private String controlCategory;
     private String drugCode;
     private String traceCode;
     private String batchNumber;
@@ -46,6 +47,9 @@ public class DrugStock {
 
     public String getDrugName() { return drugName; }
     public void setDrugName(String drugName) { this.drugName = drugName; }
+
+    public String getControlCategory() { return controlCategory; }
+    public void setControlCategory(String controlCategory) { this.controlCategory = controlCategory; }
 
     public String getDrugCode() { return drugCode; }
     public void setDrugCode(String drugCode) { this.drugCode = drugCode; }

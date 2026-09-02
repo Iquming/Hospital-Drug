@@ -12,6 +12,7 @@ public class DrugCatalog {
     private String specification;
     private String dosageForm;
     private String manufacturer;
+    private String controlCategory;
     private Boolean isSplitAllowed;
     private String packageUnit;
     private String minUnit;

@@ -37,17 +37,19 @@ public class DrugAcceptanceService {
         if (!StringUtils.hasText(drug.getTraceCode())) {
             throw new IllegalArgumentException("追溯码不能为空");
         }
-        if (!StringUtils.hasText(drug.getDrugName())) {
-            throw new IllegalArgumentException("药品名称不能为空");
+        if (drug.getCatalogId() == null && !StringUtils.hasText(drug.getDrugName())) {
+            throw new IllegalArgumentException("请选择药品档案");
         }
         requireValidExpiry(drug.getExpireDate());
 
         String traceCode = drug.getTraceCode().trim();
-        String drugName = drug.getDrugName().trim();
         String operator = StringUtils.hasText(operatorId) ? operatorId.trim() : "未知操作员";
         drug.setTraceCode(traceCode);
-        drug.setDrugName(drugName);
+        if (StringUtils.hasText(drug.getDrugName())) {
+            drug.setDrugName(drug.getDrugName().trim());
+        }
         drugCatalogService.applyCatalogDefaults(drug);
+        String drugName = drug.getDrugName().trim();
 
         DrugStock existDrug = drugDao.getDrugByTraceCode(traceCode);
         if (existDrug != null) {
